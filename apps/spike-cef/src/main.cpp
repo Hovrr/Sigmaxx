@@ -11,16 +11,23 @@
 //    - OnAcceleratedPaint shared-D3D-texture capture + composition,
 //    - results JSON parity with Spike A for ADR-0002.
 //
+//  SDK drift notes (QA r-B2, pinned dist = cef_binary_151.x):
+//    * Browser params/returns across the public C++ API are Chromium's
+//      scoped_refptr<T>, NOT CefRefPtr<T> - overrides must match exactly.
+//    * WIN32_LEAN_AND_MEAN hides CoInitializeEx -> include <objbase.h>.
+//
 //  Built ONLY when -DSX_ENABLE_CEF_SPIKE=ON (see apps/spike-cef/CMakeLists.txt).
 // ============================================================================
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <objbase.h>                 // CoInitializeEx/CoUninitialize (LEAN_AND_MEAN hides them)
 
 #include <include/cef_app.h>
 #include <include/cef_browser.h>
 #include <include/cef_client.h>
+#include <include/cef_life_span_handler.h>
 #include <include/cef_render_handler.h>
 #include <include/wrapper/cef_helpers.h>
 
@@ -36,19 +43,29 @@ constexpr wchar_t kWndClass[] = L"SigmaxxPhase0WndCef";
 constexpr UINT kTimerPump = 1;
 
 HWND g_hwnd = nullptr;
-CefRefPtr<CefBrowser> g_browser;
+scoped_refptr<CefBrowser> g_browser;   // CEF 151+: public API uses Chromium's scoped_refptr
 std::atomic<unsigned long long> g_paintFrames{ 0 };
 
 // Minimal render handler: OSR geometry + frame counter (shared-texture path
 // lands in the next iteration per the plan doc).
+//
+// NOTE (SDK drift, QA r-B2): modern CEF passes browsers as Chromium's
+// scoped_refptr<CefBrowser>, NOT CefRefPtr - overriding with the exact base
+// signatures is mandatory or 'override' fails with C3668.
 class SpikeRenderHandler : public CefRenderHandler {
  public:
-  void GetViewRect(CefRefPtr<CefBrowser>, int& w, int& h) override {
+  void GetViewRect(scoped_refptr<CefBrowser>, CefRect& rect) override {
     RECT rc{};
-    if (g_hwnd && GetClientRect(g_hwnd, &rc)) { w = rc.right; h = rc.bottom; }
-    else { w = 1280; h = 840; }
+    int w = 1280;
+    int h = 840;
+    if (g_hwnd && GetClientRect(g_hwnd, &rc)) {
+      if (rc.right > rc.left) w = rc.right;
+      if (rc.bottom > rc.top) h = rc.bottom;
+    }
+    rect = CefRect(0, 0, w, h);
   }
-  void OnPaint(CefRefPtr<CefBrowser>, PaintElementType, const RectList&,
+
+  void OnPaint(scoped_refptr<CefBrowser>, PaintElementType, const RectList&,
                const void*, int, int) override {
     ++g_paintFrames;
   }
@@ -57,14 +74,29 @@ class SpikeRenderHandler : public CefRenderHandler {
   IMPLEMENT_REFCOUNTING(SpikeRenderHandler);
 };
 
-class SpikeClient : public CefClient {
+// Captures the browser handle so WM_SIZE can drive WasResized().
+class SpikeLifeSpanHandler : public CefLifeSpanHandler {
  public:
-  CefRefPtr<CefRenderHandler> GetRenderHandler() override {
-    return g_render_handler_;
+  void OnAfterCreated(scoped_refptr<CefBrowser> browser) override {
+    g_browser = browser;
   }
 
  private:
-  CefRefPtr<SpikeRenderHandler> g_render_handler_ = new SpikeRenderHandler();
+  IMPLEMENT_REFCOUNTING(SpikeLifeSpanHandler);
+};
+
+class SpikeClient : public CefClient {
+ public:
+  scoped_refptr<CefRenderHandler> GetRenderHandler() override {
+    return render_handler_;
+  }
+  scoped_refptr<CefLifeSpanHandler> GetLifeSpanHandler() override {
+    return life_span_handler_;
+  }
+
+ private:
+  CefRefPtr<SpikeRenderHandler> render_handler_ = new SpikeRenderHandler();
+  CefRefPtr<SpikeLifeSpanHandler> life_span_handler_ = new SpikeLifeSpanHandler();
   IMPLEMENT_REFCOUNTING(SpikeClient);
 };
 
@@ -105,7 +137,7 @@ void DumpBenchmarkPage(const std::wstring& dir) {
 
 int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   CefMainArgs main_args(GetModuleHandleW(nullptr));
-  CefRefPtr<CefApp> app;
+  scoped_refptr<CefApp> app;
 
   // Child-process handoff (GPU/renderer helpers re-enter here).
   if (CefExecuteProcess(main_args, app, nullptr) >= 0) return 0;
@@ -145,7 +177,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   DumpBenchmarkPage(base + L"\\www");
 
   CefWindowInfo info;
-  info.SetAsWindowless(0);                       // true OSR; compositor next step
+  info.SetAsWindowless(nullptr);                 // true OSR; compositor next step
   CefBrowserSettings bsettings;
   bsettings.windowless_frame_rate = 120;
 
