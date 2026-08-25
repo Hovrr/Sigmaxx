@@ -3,7 +3,7 @@
 //  ----------------------------------------------------------------------------
 //  Native Win32 host that boots an Evergreen WebView2 environment, serves the
 //  embedded benchmark page over a virtual host name, injects real OS-level
-//  pointer input during Phase B (SendInput), streams process working-set
+//  pointer input during Phase B (SetCursorPos), streams process working-set
 //  telemetry into the page, and persists the benchmark report JSON next to the
 //  executable for QA collection.
 //
@@ -19,10 +19,9 @@
 //      retrieved with TryGetWebMessageAsString.
 //    * Handlers are kept as ComPtrs; .Get() is only used where consumed.
 //
-//  Input-injection contract (QA round 3):
-//    Motion uses RELATIVE SendInput deltas anchored by SetCursorPos - no
-//    absolute 0..65535 mapping, which is unreliable across mixed-DPI
-//    monitors. A watchdog snaps the cursor back if it leaves the window.
+//  Input-injection contract (QA round 4):
+//    Motion is pure SetCursorPos over ClientToScreen coordinates - exact
+//    physical pixels under Per-Monitor V2. No SendInput mapping involved.
 //
 //  Build requirements: UNICODE/_UNICODE are defined by CMakeLists.txt.
 // ============================================================================
@@ -157,15 +156,13 @@ void AlertHr(const wchar_t* what, HRESULT hr) {
 }
 
 // ------------------------------------------------------- input injection
-// Strategy (QA round 3): avoid ABSOLUTE SendInput mapping altogether.
-// MOUSEEVENTF_ABSOLUTE(+VIRTUALDESK) demands exact physical-pixel knowledge of
-// the desktop bounds, which breaks on mixed-DPI multi-monitor layouts (QA:
-// v1 flew across screens, v2 pinned dead). Instead we:
-//   1. anchor the cursor at the window center via SetCursorPos - same
-//      coordinate space as ClientToScreen, immune to DPI/virtual-desk algebra,
-//   2. drive motion with RELATIVE SendInput deltas along the lissajous path,
-//   3. run a containment watchdog that snaps the cursor back to the window
-//      center whenever it escapes the window's own screen rectangle.
+// Strategy (QA round 4, FINAL): drive the cursor with SetCursorPos only.
+// SendInput's absolute mode needs physical desktop bounds (breaks on
+// mixed-DPI multi-monitor) and its relative mode feeds 'mickeys' through
+// pointer-acceleration curves (small deltas get swallowed -> dead cursor).
+// SetCursorPos consumes exactly the coordinates ClientToScreen produces, so
+// there is no mapping layer left to get wrong, and the resulting WM_MOUSEMOVE
+// stream reaches the WebView as genuine pointer activity.
 void StartInjection(HWND hwnd) {
   if (g_injectRun.exchange(true)) return;
 
@@ -183,11 +180,10 @@ void StartInjection(HWND hwnd) {
   ClientToScreen(hwnd, &start);
   SetCursorPos(start.x, start.y);            // deterministic anchor
 
-  g_injectThread = std::thread([hwnd, center, ax, ay, start] {
+  g_injectThread = std::thread([hwnd, center, ax, ay] {
     using clock = std::chrono::steady_clock;
     const auto t0 = clock::now();
     long long tick = 0;
-    POINT prev = start;
 
     while (g_injectRun.load(std::memory_order_relaxed)) {
       const auto next = t0 + std::chrono::milliseconds(++tick * 4);   // 250 Hz
@@ -198,6 +194,8 @@ void StartInjection(HWND hwnd) {
           crc.bottom <= crc.top)
         break;                                   // window gone / minimized
 
+      // Lissajous target clamped into the client rect, converted to screen
+      // space, applied verbatim - one coordinate space, end to end.
       POINT p{
         std::min(std::max(center.x + LONG(ax * sin(2.0 * t)), crc.left),
                  crc.right - 1),
@@ -205,32 +203,7 @@ void StartInjection(HWND hwnd) {
                  crc.bottom - 1)
       };
       ClientToScreen(hwnd, &p);
-
-      const LONG dx = p.x - prev.x;
-      const LONG dy = p.y - prev.y;
-      if (dx != 0 || dy != 0) {
-        INPUT in{};
-        in.type = INPUT_MOUSE;
-        in.mi.dwFlags = MOUSEEVENTF_MOVE;        // RELATIVE: no DPI algebra
-        in.mi.dx = dx;
-        in.mi.dy = dy;
-        if (SendInput(1, &in, sizeof(INPUT)) == 1) prev = p;
-      }
-
-      // Containment watchdog (~every 128 ms): OS pointer-acceleration may
-      // distort relative deltas; if we ever leave the window rect, snap back.
-      if ((tick % 32) == 0) {
-        POINT cur{};
-        if (GetCursorPos(&cur)) {
-          RECT wr{};
-          if (GetWindowRect(hwnd, &wr) && !PtInRect(&wr, cur)) {
-            POINT c{ center };
-            ClientToScreen(hwnd, &c);
-            SetCursorPos(c.x, c.y);
-            prev = c;
-          }
-        }
-      }
+      SetCursorPos(p.x, p.y);
 
       std::this_thread::sleep_until(next);
     }
