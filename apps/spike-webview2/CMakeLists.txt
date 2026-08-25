@@ -1,4 +1,7 @@
-include(WebView2SDK) # already included by root; harmless re-include
+# The WebView2 SDK target is created by the root list file (module WebView2SDK).
+if(NOT TARGET sx::webview2)
+  message(FATAL_ERROR "sx::webview2 not defined - root CMakeLists.txt must include(WebView2SDK)")
+endif()
 
 add_executable(spike_webview2 WIN32
   src/main.cpp
