@@ -58,7 +58,7 @@ inline constexpr char kIndexHtml[] = R"html(<!DOCTYPE html>
 <div id="welcome" class="overlay"><div class="panel"><div class="hud">
   <div style="font-size:18px;font-weight:700;margin-bottom:6px">Automated benchmark starting</div>
   <div class="note">During <b>Phase B (~15 s)</b> this test moves your mouse cursor automatically
-  along a Lissajous path to measure real input-to-paint latency.<br><br>
+  along a Lissajous path <b>inside this window</b> to measure real input-to-paint latency.<br><br>
   Please do <b>not</b> touch the mouse or keyboard until the results panel appears.</div>
 </div></div></div>
 
@@ -291,15 +291,24 @@ addEventListener("keydown",e=>{ if(!running&&(e.key==="r"||e.key==="R")) runAll(
 /* ======================= host message plumbing ======================= */
 let began=false;
 function beginOnce(){ if(began)return; began=true; setTimeout(runAll,800); }
+// Host pushes arrive as ALREADY-PARSED objects via PostWebMessageAsJson
+// (strings only when we sent postMessage(string)). Accept both shapes -
+// JSON.parse(object) throws and would silently drop every host message.
+function absorbHost(m){
+  if(!m || typeof m!=="object") return;
+  if(m.type==="begin")          beginOnce();
+  else if(m.type==="hostinfo")  coldStartMs=m.coldStartMs|0;
+  else if(m.type==="mem")       peakMemMb=Math.max(peakMemMb,m.mb|0);
+  else if(m.type==="saved")     $("savePath").textContent="Results saved: "+m.path;
+}
 if(host){
   host.addEventListener("message", ev=>{
-    let m; try{ m=JSON.parse(ev.data); }catch(err){ return; }
-    if(m.type==="begin")             beginOnce();
-    else if(m.type==="hostinfo")     coldStartMs=m.coldStartMs|0;
-    else if(m.type==="mem")          peakMemMb=Math.max(peakMemMb,m.mb|0);
-    else if(m.type==="saved")        $("savePath").textContent="Results saved: "+m.path;
+    let d=ev.data;
+    if(typeof d==="string"){ try{ d=JSON.parse(d); }catch(err){ return; } }
+    try{ absorbHost(d); }catch(err){}
   });
   setTimeout(beginOnce,12000);
+  post({type:"ready"});   // pull-model initial sync: request hostinfo + mem
 }else{
   setTimeout(beginOnce,1200);
 }
