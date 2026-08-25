@@ -11,7 +11,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # vcpkg manifest mode is driven by the toolchain file; nothing to do here.
-include(cmake/WebView2SDK.cmake)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(WebView2SDK)
 
 add_subdirectory(libs/sx_eal)
 add_subdirectory(apps/spike-webview2)
