@@ -15,6 +15,8 @@
 //    * add_NavigationCompleted / add_WebMessageReceived take an
 //      EventRegistrationToken* out-param as their second argument.
 //    * SetVirtualHostNameToFolderMapping lives on ICoreWebView2_3+, so we QI.
+//    * Settings property is IsZoomControlEnabled; string web messages are
+//      retrieved with TryGetWebMessageAsString.
 //
 //  Build requirements: UNICODE/_UNICODE are defined by CMakeLists.txt.
 // ============================================================================
@@ -24,9 +26,11 @@
 #include <windows.h>
 #include <psapi.h>
 
+#include <wrl.h>
 #include <wrl/client.h>
 #include <wrl/event.h>
 #include <WebView2.h>
+#include <WebView2EnvironmentOptions.h>
 
 #include <atomic>
 #include <cmath>
@@ -167,7 +171,7 @@ void StartInjection(HWND hwnd) {
                center.y + LONG(ay * sin(3.0 * t + 0.7)) };
       ClientToScreen(hwnd, &p);
 
-      INPUT in{};                                     // absolute virtual-desktop move
+      INPUT in{};                                   // absolute virtual-desktop move
       in.type = INPUT_MOUSE;
       in.mi.dwFlags =
           MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
@@ -289,7 +293,7 @@ HRESULT InitWebView(HWND hwnd) {
 
             ComPtr<ICoreWebView2Settings> settings;
             if (SUCCEEDED(g_web->get_Settings(&settings)))
-              settings->put_ZoomControlEnabled(FALSE);
+              settings->put_IsZoomControlEnabled(FALSE);
 
             RECT rc{};
             GetClientRect(hwnd, &rc);
@@ -346,7 +350,8 @@ HRESULT InitWebView(HWND hwnd) {
                        ICoreWebView2WebMessageReceivedEventArgs* args)
                         -> HRESULT {
                       LPWSTR raw = nullptr;
-                      if (SUCCEEDED(args->get_WebMessageAsString(&raw)) && raw) {
+                      if (SUCCEEDED(args->TryGetWebMessageAsString(&raw)) &&
+                          raw) {
                         std::wstring text(raw);
                         CoTaskMemFree(raw);
                         HandleWebMessage(text);
@@ -372,9 +377,14 @@ HRESULT InitWebView(HWND hwnd) {
             return env->CreateCoreWebView2Controller(hwnd, onController);
           }).Get();
 
+  // Canonical bootstrap per SDK samples: explicit (default-valued) options
+  // object rather than a bare nullptr for the options slot.
+  ComPtr<ICoreWebView2EnvironmentOptions> opts =
+      Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
+
   return CreateCoreWebView2EnvironmentWithOptions(
-      nullptr /* evergreen */, g_userDataDir.c_str(),
-      nullptr /* default options */, onEnvironment.Get());
+      nullptr /* evergreen */, g_userDataDir.c_str(), opts.Get(),
+      onEnvironment.Get());
 }
 
 } // namespace
