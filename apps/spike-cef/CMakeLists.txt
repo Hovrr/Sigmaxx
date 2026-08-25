@@ -13,7 +13,8 @@ add_executable(spike_cef WIN32
 
 set_target_properties(spike_cef PROPERTIES
   OUTPUT_NAME "SigmaxxPhase0-CefOsr"
-  MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+  MSVC_RUNTIME_LIBRARY "MultiThreadedDLL"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin-cef")
 
 target_include_directories(spike_cef PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
