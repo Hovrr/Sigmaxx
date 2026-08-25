@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "sigmaxx",
+  "version": "0.1.0",
+  "description": "Sigmaxx hybrid vector/raster design suite. Phase 0 monorepo manifest.",
+  "dependencies": [
+    "flatbuffers"
+  ],
+  "builtin-baseline": "__VCPKG_BASELINE__"
+}
