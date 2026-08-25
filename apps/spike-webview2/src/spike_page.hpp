@@ -206,6 +206,7 @@ function hudTick(){
     "jank       "+(ft.length?100*jank/ft.length:0).toFixed(2)+" %\n"+
     "lat p95    "+(pct(latSamples,95)||0).toFixed(1)+" ms  (n="+latSamples.length+")\n"+
     "objects    "+N+"\n"+
+    "inj        "+(window.__injectStats ? (window.__injectStats.ticks+" ticks / "+window.__injectStats.moves+" moves") : "-")+"\n"+
     "mem peak   "+peakMemMb+" MB\n"+
     "coldstart  "+coldStartMs+" ms";
 }
@@ -245,7 +246,8 @@ function buildResults(opsPerSec){
     meta:{ when:new Date().toISOString(), ua:navigator.userAgent,
            screen:{w:innerWidth,h:innerHeight,dpr:window.devicePixelRatio||1},
            refreshEstimateHz:refreshEst, objects:N, suite:"phase0-webview2-spike",
-           protocol:sx_eal_version() },
+           protocol:sx_eal_version(),
+           injection:window.__injectStats||null },
     metrics:{ inputLatencyMs:{p50,p95,p99,n:latSamples.length}, fpsAvg,
               frameMedianMs:med, jankPct, throughputOpsPerSec:opsPerSec,
               coldStartMs, peakWorkingSetMb:peakMemMb },
@@ -300,6 +302,7 @@ function absorbHost(m){
   else if(m.type==="hostinfo")  coldStartMs=m.coldStartMs|0;
   else if(m.type==="mem")       peakMemMb=Math.max(peakMemMb,m.mb|0);
   else if(m.type==="saved")     $("savePath").textContent="Results saved: "+m.path;
+  else if(m.type==="inject-stats") window.__injectStats={ticks:m.ticks,moves:m.moves};
 }
 if(host){
   host.addEventListener("message", ev=>{
