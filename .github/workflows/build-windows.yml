@@ -54,7 +54,8 @@ jobs:
           Write-Host "vcpkg ready @ $sha"
 
       - name: Bootstrap vcpkg
-        run: & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+        run: |
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
 
       - name: Prime vcpkg binary-cache directory
         run: New-Item -ItemType Directory -Force -Path "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
