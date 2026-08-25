@@ -5,7 +5,8 @@
 //  embedded benchmark page over a virtual host name, injects synthetic mouse
 //  input into the WebView during Phase B (posted WM_MOUSEMOVE), streams
 //  process working-set telemetry into the page, and persists the benchmark
-//  report JSON next to the executable for QA collection.
+//  telemetry into the page, and persists the benchmark report JSON next to the
+//  executable for QA collection.
 //
 //  Gates under test (BLUEPRINT.md §1.3):
 //    pointer→paint p95 ≤16 ms · FPS ≥ ~refresh·0.9 · jank <1%
@@ -185,7 +186,7 @@ BOOL CALLBACK FindRenderWidgetProc(HWND h, LPARAM lp) {
   if (GetClassNameW(h, cls, 64) &&
       wcsstr(cls, L"Chrome_RenderWidgetHostHWND")) {
     *reinterpret_cast<HWND*>(lp) = h;
-    return FALSE;                               // stop at first match
+    return FALSE;                              // stop at first match
   }
   return TRUE;
 }

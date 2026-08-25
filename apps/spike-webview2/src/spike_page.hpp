@@ -63,7 +63,7 @@ inline constexpr char kIndexHtml[] = R"html(<!DOCTYPE html>
 <div id="welcome" class="overlay"><div class="panel"><div class="hud">
   <div style="font-size:18px;font-weight:700;margin-bottom:6px">Automated benchmark starting</div>
   <div class="note">During <b>Phase B (~15 s)</b> this test moves your mouse cursor automatically
-  along a Lissajous path <b>inside this window</b> to measure real input-to-paint latency.<br><br>
+  along a Lissajous path to measure real input-to-paint latency.<br><br>
   Please do <b>not</b> touch the mouse or keyboard until the results panel appears.</div>
 </div></div></div>
 
@@ -179,7 +179,6 @@ let prevT=performance.now(), simT=0;
 function frame(now){
   const dt = now-prevT; prevT = now; simT += dt/1000;
   frameDeltas.push(dt); if(frameDeltas.length>3000) frameDeltas.shift();
-  
   // Input→paint latency: measure against performance.now() AT CALLBACK TIME,
   // never the rAF vsync timestamp (it can predate the event and go negative).
   if(hadInput){
@@ -187,7 +186,6 @@ function frame(now){
     if(l>=0 && l<120) latSamples.push(l);
     hadInput=false;
   }
-  
   if(latSamples.length>4000) latSamples.splice(0,latSamples.length-4000);
   fpsCount++;
   if(now-lastFpsT>=1000){ fpsHist.push(fpsCount*1000/(now-lastFpsT)); if(fpsHist.length>240)fpsHist.shift();
@@ -301,14 +299,12 @@ function finishReport(){
 async function runAll(){
   if(running) return; running=true;
   $("welcome").style.display="none"; $("results").style.display="none";
-  $("cursor").style.display="none";
   setPhase("Welcome","hands off mouse/keyboard",0); await sleep(3000);
   latSamples=[]; frameDeltas=[]; fpsHist=[];
   setPhase("A · Idle baseline","measuring refresh & pacing",.15);
   await sleep(6000);
   setPhase("B · Input storm","native SendInput active",.35);
   post({type:"inject-start"}); await sleep(15000); post({type:"inject-stop"});
-  $("cursor").style.display="none";
   setPhase("C · Command throughput","saturating main-thread edit path",.7);
   window.__opsPerSec = await throughputPhase(5000);
   setPhase("D · Compiling report","",.92); await sleep(400);
