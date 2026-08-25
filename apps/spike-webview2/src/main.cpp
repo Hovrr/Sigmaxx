@@ -17,6 +17,8 @@
 //    * SetVirtualHostNameToFolderMapping lives on ICoreWebView2_3+, so we QI.
 //    * Settings property is IsZoomControlEnabled; string web messages are
 //      retrieved with TryGetWebMessageAsString.
+//    * Handlers are kept as ComPtrs; .Get() is only used at the point where a
+//      raw interface pointer is consumed.
 //
 //  Build requirements: UNICODE/_UNICODE are defined by CMakeLists.txt.
 // ============================================================================
@@ -362,9 +364,12 @@ HRESULT InitWebView(HWND hwnd) {
 
             (void)tokNav; (void)tokMsg;  // lifetime = window; never revoked
             return S_OK;
-          }).Get();
+          });
 
   // -- environment-completed handler ------------------------------------
+  // NOTE: keep handlers as ComPtrs. Never store `Callback(...).Get()` in a
+  // variable - the temporary releases the delegate object at the semicolon,
+  // leaving a dangling pointer that WebView2 would invoke later.
   auto onEnvironment =
       Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
           [hwnd, onController](HRESULT hr,
@@ -374,8 +379,8 @@ HRESULT InitWebView(HWND hwnd) {
               return E_FAIL;
             }
             g_env = env;
-            return env->CreateCoreWebView2Controller(hwnd, onController);
-          }).Get();
+            return env->CreateCoreWebView2Controller(hwnd, onController.Get());
+          });
 
   // Canonical bootstrap per SDK samples: explicit (default-valued) options
   // object rather than a bare nullptr for the options slot.
