@@ -10,6 +10,13 @@
 //  Gates under test (BLUEPRINT.md §1.3):
 //    pointer→paint p95 ≤16 ms · FPS ≥ ~refresh·0.9 · jank <1%
 //    throughput ≥5k ops/s · cold start ≤3 s · working set ≤700 MB
+//
+//  SDK contract notes (pinned Microsoft.Web.WebView2 1.0.2210.55):
+//    * add_NavigationCompleted / add_WebMessageReceived take an
+//      EventRegistrationToken* out-param as their second argument.
+//    * SetVirtualHostNameToFolderMapping lives on ICoreWebView2_3+, so we QI.
+//
+//  Build requirements: UNICODE/_UNICODE are defined by CMakeLists.txt.
 // ============================================================================
 
 #define WIN32_LEAN_AND_MEAN
@@ -24,7 +31,6 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -43,18 +49,18 @@ constexpr wchar_t kWndClass[]   = L"SigmaxxPhase0Wnd";
 constexpr wchar_t kHostName[]   = L"spike.sigmaxx.app";
 constexpr UINT    kTimerMem     = 1;
 
-HWND                       g_hwnd      = nullptr;
-ComPtr<ICoreWebView2Environment> g_env;
-ComPtr<ICoreWebView2Controller>  g_ctl;
-ComPtr<ICoreWebView2>            g_web;
+HWND                              g_hwnd       = nullptr;
+ComPtr<ICoreWebView2Environment>  g_env;
+ComPtr<ICoreWebView2Controller>   g_ctl;
+ComPtr<ICoreWebView2>             g_web;
 
-ULONGLONG                  g_tEntryMs  = 0;
-std::wstring               g_rtvVer;
-fs::path                   g_exeDir, g_userDataDir, g_wwwDir;
+ULONGLONG                         g_tEntryMs   = 0;
+std::wstring                      g_rtvVer;
+fs::path                          g_exeDir, g_userDataDir, g_wwwDir;
 
-std::atomic<bool>          g_injectRun{ false };
-std::thread                g_injectThread;
-POINT                      g_cursorRestore{};
+std::atomic<bool>                 g_injectRun{ false };
+std::thread                       g_injectThread;
+POINT                             g_cursorRestore{};
 
 ULONGLONG NowMs() { return GetTickCount64(); }
 
@@ -68,9 +74,11 @@ std::wstring Utf8ToWide(const std::string& s) {
 }
 std::string WideToUtf8(const std::wstring& w) {
   if (w.empty()) return {};
-  int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+  int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0,
+                              nullptr, nullptr);
   std::string s(n, '\0');
-  WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
+  WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n,
+                      nullptr, nullptr);
   return s;
 }
 
@@ -90,9 +98,11 @@ std::wstring JsonEscape(const std::wstring& v) {
   return out;
 }
 
-// Pulls a JSON string value ("key":"value") out of our own well-formed messages,
-// decoding the escapes we emit above. Deliberately tiny: no JSON dependency yet.
-bool ExtractQuoted(const std::wstring& src, const std::wstring& key, std::wstring& out) {
+// Pulls a JSON string value ("key":"value") out of our own well-formed
+// messages, decoding the escapes emitted by JsonEscape(). Deliberately tiny:
+// the spike carries no JSON dependency.
+bool ExtractQuoted(const std::wstring& src, const std::wstring& key,
+                   std::wstring& out) {
   const std::wstring pat = L"\"" + key + L"\":\"";
   size_t p = src.find(pat);
   if (p == std::wstring::npos) return false;
@@ -108,7 +118,7 @@ bool ExtractQuoted(const std::wstring& src, const std::wstring& key, std::wstrin
         case L't': out += L'\t'; break;
         case L'r': out += L'\r'; break;
         case L'u': q += 4; break;             // BMP escape: not produced by us
-        default: out += ch; break;
+        default:   out += ch;  break;
       }
     } else if (ch == L'\\') esc = true;
       else if (ch == L'"')  return true;
@@ -124,8 +134,9 @@ void PostJson(const std::wstring& json) {
 void AlertHr(const wchar_t* what, HRESULT hr) {
   wchar_t msg[512];
   swprintf_s(msg, L"%s failed.\n\nHRESULT: 0x%08X\n\n"
-                  L"If this mentions WebView2 runtime, install the Evergreen "
-                  L"Runtime:\nhttps://go.microsoft.com/fwlink/p/?LinkId=2124703",
+                  L"If this mentions the WebView2 runtime, install the "
+                  L"Evergreen Runtime:\n"
+                  L"https://go.microsoft.com/fwlink/p/?LinkId=2124703",
              what, (unsigned)hr);
   MessageBoxW(nullptr, msg, L"Sigmaxx Phase 0", MB_ICONERROR | MB_OK);
 }
@@ -156,9 +167,10 @@ void StartInjection(HWND hwnd) {
                center.y + LONG(ay * sin(3.0 * t + 0.7)) };
       ClientToScreen(hwnd, &p);
 
-      INPUT in{};                                   // absolute virtual-desktop move
+      INPUT in{};                                     // absolute virtual-desktop move
       in.type = INPUT_MOUSE;
-      in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+      in.mi.dwFlags =
+          MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
       in.mi.dx = LONG((p.x - mi.rcMonitor.left) * 65535.0 /
                       double(mi.rcMonitor.right - mi.rcMonitor.left));
       in.mi.dy = LONG((p.y - mi.rcMonitor.top) * 65535.0 /
@@ -177,9 +189,12 @@ void StopInjection() {
 }
 
 // ------------------------------------------------------------ persistence
-fs::path SaveResultsFile(const std::wstring& filename, const std::wstring& content) {
-  const auto name = filename.empty() ? L"sigmaxx-phase0-webview2-results.json"
-                                     : filename;
+fs::path SaveResultsFile(const std::wstring& filename,
+                         const std::wstring& content) {
+  const auto name = filename.empty()
+                        ? std::wstring(L"sigmaxx-phase0-webview2-results.json")
+                        : filename;
+
   std::wstring usedPath;
   auto tryWrite = [&](const fs::path& p) -> bool {
     try {
@@ -189,13 +204,17 @@ fs::path SaveResultsFile(const std::wstring& filename, const std::wstring& conte
       if (!f) return false;
       const std::string bytes = WideToUtf8(content);
       f.write(bytes.data(), (std::streamsize)bytes.size());
+      if (!f.good()) return false;
       usedPath = p.wstring();
-      return f.good();
+      return true;
     } catch (...) { return false; }
   };
 
   if (!tryWrite(g_exeDir / name))
     tryWrite(g_userDataDir / name);
+
+  if (usedPath.empty())
+    usedPath = L"(could not write file - use the Copy results JSON button)";
 
   PostJson(L"{\"type\":\"saved\",\"path\":\"" + JsonEscape(usedPath) + L"\"}");
   return usedPath;
@@ -218,7 +237,8 @@ void HandleWebMessage(const std::wstring& msg) {
 // ------------------------------------------------------------- app plumbing
 void UpdateBounds() {
   RECT rc{};
-  if (g_ctl && GetClientRect(g_hwnd, &rc) && rc.right > rc.left && rc.bottom > rc.top)
+  if (g_ctl && GetClientRect(g_hwnd, &rc) && rc.right > rc.left &&
+      rc.bottom > rc.top)
     g_ctl->put_Bounds(rc);
 }
 
@@ -256,75 +276,105 @@ void DumpBenchmarkPage() {
 }
 
 HRESULT InitWebView(HWND hwnd) {
-  auto onController = Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-      [hwnd](HRESULT hr, ICoreWebView2Controller* ctl) -> HRESULT {
-        if (FAILED(hr) || !ctl) { AlertHr(L"CreateCoreWebView2Controller", hr); return E_FAIL; }
-        g_ctl = ctl;
-        ctl->get_CoreWebView2(&g_web);
+  // -- controller-completed handler -------------------------------------
+  auto onController =
+      Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+          [hwnd](HRESULT hr, ICoreWebView2Controller* ctl) -> HRESULT {
+            if (FAILED(hr) || !ctl) {
+              AlertHr(L"CreateCoreWebView2Controller", hr);
+              return E_FAIL;
+            }
+            g_ctl = ctl;
+            ctl->get_CoreWebView2(&g_web);
 
-        ComPtr<ICoreWebView2Settings> settings;
-        if (SUCCEEDED(g_web->get_Settings(&settings)))
-          settings->put_ZoomControlEnabled(FALSE);   // keep Ctrl+wheel out of latency data
+            ComPtr<ICoreWebView2Settings> settings;
+            if (SUCCEEDED(g_web->get_Settings(&settings)))
+              settings->put_ZoomControlEnabled(FALSE);
 
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        ctl->put_Bounds(rc);
-        ctl->put_IsVisible(TRUE);
-        ctl->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            ctl->put_Bounds(rc);
+            ctl->put_IsVisible(TRUE);
+            ctl->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
 
-        g_web->SetVirtualHostNameToFolderMapping(
-            kHostName, g_wwwDir.c_str(),
-            COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
+            // Virtual host mapping needs ICoreWebView2_3+; fall back to a
+            // plain file URL on ancient runtimes so QA still gets a window.
+            std::wstring url;
+            ComPtr<ICoreWebView2_3> web3;
+            if (SUCCEEDED(g_web.As(&web3)) && web3) {
+              web3->SetVirtualHostNameToFolderMapping(
+                  kHostName, g_wwwDir.c_str(),
+                  COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
+              url = std::wstring(L"https://") + kHostName + L"/index.html";
+            } else {
+              std::wstring dir = g_wwwDir.wstring();
+              for (wchar_t& c : dir) if (c == L'\\') c = L'/';
+              url = L"file:///" + dir + L"/index.html";
+            }
+            g_web->Navigate(url.c_str());
 
-        g_web->add_NavigationCompleted(
-            Callback<ICoreWebView2NavigationCompletedEventHandler>(
-                [hwnd](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs* args)
-                    -> HRESULT {
-                  BOOL ok = FALSE;
-                  args->get_IsSuccess(&ok);
-                  if (!ok) {
-                    SetWindowTextW(hwnd, L"Sigmaxx P0 spike — page load FAILED");
-                    return S_OK;
-                  }
-                  const ULONGLONG cold = NowMs() - g_tEntryMs;
-                  wchar_t buf[160];
-                  swprintf_s(buf, L"{\"type\":\"hostinfo\",\"coldStartMs\":%llu,\"runtime\":\"%s\"}",
-                             (unsigned long long)cold, JsonEscape(g_rtvVer).c_str());
-                  PostJson(buf);
-                  SetTimer(hwnd, kTimerMem, 1000, nullptr);
-                  PostJson(L"{\"type\":\"begin\"}");
-                  return S_OK;
-                }).Get());
+            EventRegistrationToken tokNav{};
+            g_web->add_NavigationCompleted(
+                Callback<ICoreWebView2NavigationCompletedEventHandler>(
+                    [hwnd](ICoreWebView2*,
+                           ICoreWebView2NavigationCompletedEventArgs* args)
+                        -> HRESULT {
+                      BOOL ok = FALSE;
+                      if (SUCCEEDED(args->get_IsSuccess(&ok)) && !ok) {
+                        SetWindowTextW(hwnd,
+                                       L"Sigmaxx P0 spike - page load FAILED");
+                        return S_OK;
+                      }
+                      const ULONGLONG cold = NowMs() - g_tEntryMs;
+                      wchar_t buf[192];
+                      swprintf_s(buf,
+                                 L"{\"type\":\"hostinfo\",\"coldStartMs\":%llu,"
+                                 L"\"runtime\":\"%s\"}",
+                                 (unsigned long long)cold,
+                                 JsonEscape(g_rtvVer).c_str());
+                      PostJson(buf);
+                      SetTimer(hwnd, kTimerMem, 1000, nullptr);
+                      PostJson(L"{\"type\":\"begin\"}");
+                      return S_OK;
+                }).Get(),
+                &tokNav);
 
-        g_web->add_WebMessageReceived(
-            Callback<ICoreWebView2WebMessageReceivedEventHandler>(
-                [](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args)
-                    -> HRESULT {
-                  LPWSTR raw = nullptr;
-                  if (SUCCEEDED(args->get_WebMessageAsString(&raw)) && raw) {
-                    std::wstring msg(raw);
-                    CoTaskMemFree(raw);
-                    HandleWebMessage(msg);
-                  }
-                  return S_OK;
-                }).Get());
+            EventRegistrationToken tokMsg{};
+            g_web->add_WebMessageReceived(
+                Callback<ICoreWebView2WebMessageReceivedEventHandler>(
+                    [](ICoreWebView2*,
+                       ICoreWebView2WebMessageReceivedEventArgs* args)
+                        -> HRESULT {
+                      LPWSTR raw = nullptr;
+                      if (SUCCEEDED(args->get_WebMessageAsString(&raw)) && raw) {
+                        std::wstring text(raw);
+                        CoTaskMemFree(raw);
+                        HandleWebMessage(text);
+                      }
+                      return S_OK;
+                }).Get(),
+                &tokMsg);
 
-        const std::wstring url =
-            std::wstring(L"https://") + kHostName + L"/index.html";
-        g_web->Navigate(url.c_str());
-        return S_OK;
-      }).Get();
+            (void)tokNav; (void)tokMsg;  // lifetime = window; never revoked
+            return S_OK;
+          }).Get();
 
-  auto onEnvironment = Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-      [hwnd, done = onController](HRESULT hr, ICoreWebView2Environment* env) mutable -> HRESULT {
-        if (FAILED(hr) || !env) { AlertHr(L"CreateCoreWebView2Environment", hr); return E_FAIL; }
-        g_env = env;
-        return env->CreateCoreWebView2Controller(hwnd, done.Get());
-      }).Get();
+  // -- environment-completed handler ------------------------------------
+  auto onEnvironment =
+      Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+          [hwnd, onController](HRESULT hr,
+                               ICoreWebView2Environment* env) -> HRESULT {
+            if (FAILED(hr) || !env) {
+              AlertHr(L"CreateCoreWebView2Environment", hr);
+              return E_FAIL;
+            }
+            g_env = env;
+            return env->CreateCoreWebView2Controller(hwnd, onController);
+          }).Get();
 
   return CreateCoreWebView2EnvironmentWithOptions(
-      nullptr /* evergreen */, g_userDataDir.c_str(), nullptr /* default options */,
-      onEnvironment.Get());
+      nullptr /* evergreen */, g_userDataDir.c_str(),
+      nullptr /* default options */, onEnvironment.Get());
 }
 
 } // namespace
@@ -335,24 +385,27 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return 1;
 
   // Per-monitor-v2 DPI so pointer math stays pixel-true.
-  if (auto fn = (decltype(&SetProcessDpiAwarenessContext))GetProcAddress(
-          GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContextW"))
+  if (auto fn = reinterpret_cast<decltype(&SetProcessDpiAwarenessContext)>(
+          GetProcAddress(GetModuleHandleW(L"user32.dll"),
+                         "SetProcessDpiAwarenessContextW")))
     fn(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-  // WebView2 runtime availability check (friendly message for non-dev machines).
+  // WebView2 runtime availability check (friendly message for non-dev PCs).
   LPWSTR ver = nullptr;
-  if (FAILED(GetAvailableCoreWebView2BrowserVersionString(nullptr, &ver)) || !ver) {
+  if (FAILED(GetAvailableCoreWebView2BrowserVersionString(nullptr, &ver)) ||
+      !ver) {
     MessageBoxW(nullptr,
-      L"Microsoft Edge WebView2 runtime was not found on this PC.\n\n"
-      L"Install the free Evergreen Runtime from:\n"
-      L"https://go.microsoft.com/fwlink/p/?LinkId=2124703\n\n…then run this spike again.",
-      L"Sigmaxx Phase 0", MB_ICONWARNING | MB_OK);
+                L"Microsoft Edge WebView2 runtime was not found on this PC.\n\n"
+                L"Install the free Evergreen Runtime from:\n"
+                L"https://go.microsoft.com/fwlink/p/?LinkId=2124703\n\n"
+                L"...then run this spike again.",
+                L"Sigmaxx Phase 0", MB_ICONWARNING | MB_OK);
     return 2;
   }
   g_rtvVer = ver;
   CoTaskMemFree(ver);
 
-  // Paths: results land beside the exe when writable, otherwise under LOCALAPPDATA.
+  // Paths: results land beside the exe when writable, else under LOCALAPPDATA.
   wchar_t exePath[MAX_PATH]{};
   GetModuleFileNameW(nullptr, exePath, MAX_PATH);
   g_exeDir = fs::path(exePath).parent_path();
@@ -373,7 +426,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   RegisterClassExW(&wc);
 
   wchar_t title[128];
-  swprintf_s(title, L"Sigmaxx — Phase 0 · WebView2 Spike · EAL bridge v%u",
+  swprintf_s(title, L"Sigmaxx - Phase 0 - WebView2 Spike - EAL bridge v%u",
              (unsigned)sx_eal::kBridgeProtocolVersion);
 
   RECT rcDesired{ 0, 0, 1280, 840 };
