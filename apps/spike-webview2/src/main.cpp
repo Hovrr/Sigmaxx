@@ -2,10 +2,10 @@
 //  Sigmaxx - Phase 0 · Spike A: WebView2 shell
 //  ----------------------------------------------------------------------------
 //  Native Win32 host that boots an Evergreen WebView2 environment, serves the
-//  embedded benchmark page over a virtual host name, injects real OS-level
-//  pointer input during Phase B (SetCursorPos), streams process working-set
-//  telemetry into the page, and persists the benchmark report JSON next to the
-//  executable for QA collection.
+//  embedded benchmark page over a virtual host name, injects synthetic mouse
+//  input into the WebView during Phase B (posted WM_MOUSEMOVE), streams
+//  process working-set telemetry into the page, and persists the benchmark
+//  report JSON next to the executable for QA collection.
 //
 //  Gates under test (BLUEPRINT.md §1.3):
 //    pointer→paint p95 ≤16 ms · FPS ≥ ~refresh·0.9 · jank <1%
@@ -19,15 +19,15 @@
 //      retrieved with TryGetWebMessageAsString.
 //    * Handlers are kept as ComPtrs; .Get() is only used where consumed.
 //
-//  Input-injection contract (QA round 6):
-//    SetCursorPos teleports the cursor without generating trusted input
-//    frames, so Chromium's pipeline never fires pointermove (QA r5: ticks ==
-//    moves == 3750 yet n=0). Delivery now goes through
-//    ICoreWebView2Controller3::SendMouseInput. Geometry is resolved to
-//    client-space pixels on the UI thread; the worker does pure math and
-//    PostMessageW's packed points (the one sanctioned cross-thread call);
-//    the UI thread performs SendMouseInput. Counters make every stage
-//    measurable: ticks (worker) / sent (accepted by WebView2).
+//  Input-injection contract (QA round 7):
+//    Windowed-mode WebView2 exposes NO input-injection API
+//    (SendMouseInput lives only on ICoreWebView2CompositionController ->
+//    C2039 on ICoreWebView2Controller3 in r6). Delivery therefore posts
+//    WM_MOUSEMOVE with self-contained client coordinates directly into
+//    Chromium's internal Chrome_RenderWidgetHostHWND child, located once
+//    via EnumChildWindows on the UI thread. Posted messages bypass OS
+//    cursor state entirely, which retires the DPI/acceleration bug class.
+//    Counters remain measurable: ticks (worker) / moves (queued).
 //
 //  Build requirements: UNICODE/_UNICODE are defined by CMakeLists.txt.
 // ============================================================================
@@ -76,22 +76,15 @@ fs::path                          g_exeDir, g_userDataDir, g_wwwDir;
 
 std::atomic<bool>                 g_injectRun{ false };
 std::thread                       g_injectThread;
-POINT                             g_cursorRestore{};
 
 // Telemetry snapshots for the page's pull-model initial sync ({type:"ready"}).
 ULONGLONG                         g_coldStartMs = 0;
 unsigned long long                g_lastMemMb   = 0;
 
 // Injection health counters (published to the page at inject-stop).
+// ticks = steps computed by the worker; moves = accepted by PostMessageW.
 std::atomic<unsigned long long>   g_injectTicks{ 0 };
 std::atomic<unsigned long long>   g_injectSent { 0 };
-
-// Direct-injection entry (QI'd once on the UI thread; null => SetCursorPos
-// fallback). WebView2 interfaces are UI-thread-only, hence the message hop.
-ComPtr<ICoreWebView2Controller3>  g_ctl3;
-
-// Worker -> UI-thread injection step (packed SHORT x/y in lParam).
-constexpr UINT kMsgInjectStep = WM_APP + 2;
 
 ULONGLONG NowMs() { return GetTickCount64(); }
 
@@ -173,12 +166,30 @@ void AlertHr(const wchar_t* what, HRESULT hr) {
 }
 
 // ------------------------------------------------------- input injection
-// Strategy (QA round 6): deliver points through SendMouseInput.
-//   * UI thread (here): resolve client-space geometry ONCE via GetClientRect.
-//   * Worker thread: pure lissajous math + PostMessageW(kMsgInjectStep) with
-//     packed SHORT coords - the one sanctioned cross-thread Win32 call.
-//   * UI thread (WndProc): unpack and call g_ctl3->SendMouseInput(MOVE).
-// SetCursorPos remains only as an automatic fallback should the QI fail.
+// Strategy (QA round 7): post WM_MOUSEMOVE straight into Chromium's input
+// child HWND.
+//
+// Why: SendMouseInput/SendPointerInput exist only on
+// ICoreWebView2CompositionController (visual hosting); windowed mode exposes
+// no injection API (C2039 on Controller3, pinned SDK 1.0.2210.55). Prior
+// rounds showed SetCursorPos teleports carry no trusted frames and SendInput
+// dies on mixed-DPI/acceleration. Chromium still consumes the classic
+// WM_MOUSEMOVE stream on its internal "Chrome_RenderWidgetHostHWND" child -
+// the same surface CEF automation drives - and posted messages carry their
+// own coordinates, so OS cursor state/DPI algebra is irrelevant.
+//
+// Threading: geometry + child lookup happen here on the UI thread; the
+// worker only does math + PostMessageW (thread-safe by design).
+BOOL CALLBACK FindRenderWidgetProc(HWND h, LPARAM lp) {
+  wchar_t cls[64]{};
+  if (GetClassNameW(h, cls, 64) &&
+      wcsstr(cls, L"Chrome_RenderWidgetHostHWND")) {
+    *reinterpret_cast<HWND*>(lp) = h;
+    return FALSE;                               // stop at first match
+  }
+  return TRUE;
+}
+
 void StartInjection(HWND hwnd) {
   if (g_injectRun.exchange(true)) return;
 
@@ -190,53 +201,54 @@ void StartInjection(HWND hwnd) {
   const POINT center{ (rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2 };
   const int ax = int((rc.right - rc.left) * 0.30);
   const int ay = int((rc.bottom - rc.top) * 0.30);
-  GetCursorPos(&g_cursorRestore);
 
-  // Client-space clamp bounds, resolved once (UI thread). Coordinates are
-  // relative to the WebView area; SendMouseInput maps them internally.
-  const POINT lo{ rc.left, rc.top };
-  const POINT hi{ rc.right - 1, rc.bottom - 1 };
-  const POINT c0{ center.x, center.y };
-
-  POINT anchor{ c0 };
-  ClientToScreen(hwnd, &anchor);
-  SetCursorPos(anchor.x, anchor.y);          // visual anchor only
+  // Locate Chromium's input child once (UI thread). Fallback: the top-level
+  // window - coords are client-relative either way; origins align in practice.
+  HWND target = nullptr;
+  EnumChildWindows(hwnd, FindRenderWidgetProc,
+                   reinterpret_cast<LPARAM>(&target));
+  if (!target || !IsWindow(target)) target = hwnd;
 
   g_injectTicks = 0;
   g_injectSent  = 0;
 
-  g_injectThread = std::thread([hwnd, c0, ax, ay, lo, hi] {
-    using clock = std::chrono::steady_clock;
-    const auto t0 = clock::now();
-    long long tick = 0;
+  g_injectThread =
+      std::thread([target, c0x = center.x, c0y = center.y, ax, ay,
+                   lox = rc.left, loy = rc.top,
+                   hix = rc.right - 1, hiy = rc.bottom - 1] {
+        using clock = std::chrono::steady_clock;
+        const auto t0 = clock::now();
+        long long tick = 0;
 
-    while (g_injectRun.load(std::memory_order_relaxed)) {
-      const auto next = t0 + std::chrono::milliseconds(++tick * 4);   // 250 Hz
-      const double t = std::chrono::duration<double>(next - t0).count();
+        while (g_injectRun.load(std::memory_order_relaxed)) {
+          const auto next =
+              t0 + std::chrono::milliseconds(++tick * 4);            // 250 Hz
+          const double t = std::chrono::duration<double>(next - t0).count();
 
-      // Pure math against captured numbers.
-      const int x = std::min(std::max(c0.x + int(ax * sin(2.0 * t)), lo.x), hi.x);
-      const int y = std::min(std::max(c0.y + int(ay * sin(3.0 * t + 0.7)), lo.y), hi.y);
+          // Pure math against captured numbers.
+          const int x = std::min(std::max(c0x + int(ax * sin(2.0 * t)), lox), hix);
+          const int y = std::min(
+              std::max(c0y + int(ay * sin(3.0 * t + 0.7)), loy), hiy);
 
-      // Pack as signed 16-bit halves; PostMessageW is thread-safe by design.
-      const LPARAM lp =
-          (static_cast<LONG>(static_cast<SHORT>(x)) & 0xFFFF) |
-          ((static_cast<LONG>(static_cast<SHORT>(y)) & 0xFFFF) << 16);
-      PostMessageW(hwnd, kMsgInjectStep, 0, lp);
-      ++g_injectTicks;
+          // Self-contained client coords travel IN the message; PostMessageW
+          // queues without touching the OS cursor or any global mapping.
+          const LPARAM lp =
+              (static_cast<LONG>(static_cast<SHORT>(x)) & 0xFFFF) |
+              ((static_cast<LONG>(static_cast<SHORT>(y)) & 0xFFFF) << 16);
+          if (PostMessageW(target, WM_MOUSEMOVE, 0, lp)) ++g_injectSent;
+          ++g_injectTicks;
 
-      std::this_thread::sleep_until(next);
-    }
-  });
+          std::this_thread::sleep_until(next);
+        }
+      });
 }
 
 void StopInjection() {
   if (!g_injectRun.exchange(false)) return;
   if (g_injectThread.joinable()) g_injectThread.join();
-  SetCursorPos(g_cursorRestore.x, g_cursorRestore.y);
 
-  // Report injection health on the UI thread. "moves" = steps accepted by
-  // the WebView2 input pipeline (SendMouseInput S_OK or fallback).
+  // Report injection health on the UI thread. "moves" = steps successfully
+  // queued into the WebView's input child.
   wchar_t b[112];
   swprintf_s(b,
              L"{\"type\":\"inject-stats\",\"ticks\":%llu,\"moves\":%llu}",
@@ -331,24 +343,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       KillTimer(hwnd, kTimerMem);
       PostQuitMessage(0);
       return 0;
-    case kMsgInjectStep: {
-      if (!g_injectRun.load()) return 0;       // drained tail after stop
-      const POINT pt{ static_cast<short>(LOWORD(lp)),
-                      static_cast<short>(HIWORD(lp)) };
-      bool ok = false;
-      if (g_ctl3) {
-        ok = SUCCEEDED(g_ctl3->SendMouseInput(
-            COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
-            COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_NONE, pt, 0));
-      }
-      if (!ok) {                               // legacy runtime fallback
-        POINT sp{ pt };
-        ClientToScreen(hwnd, &sp);
-        ok = SetCursorPos(sp.x, sp.y) != 0;
-      }
-      if (ok) ++g_injectSent;
-      return 0;
-    }
     default:
       return DefWindowProcW(hwnd, msg, wp, lp);
   }
@@ -382,9 +376,6 @@ HRESULT InitWebView(HWND hwnd) {
             ctl->put_Bounds(rc);
             ctl->put_IsVisible(TRUE);
             ctl->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
-
-            // Direct-injection entry (QA r6): QI once for SendMouseInput.
-            ctl.As(&g_ctl3);
 
             // Virtual host mapping needs ICoreWebView2_3+; fall back to a
             // plain file URL on ancient runtimes so QA still gets a window.
