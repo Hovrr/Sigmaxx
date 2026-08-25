@@ -41,10 +41,15 @@ inline constexpr char kIndexHtml[] = R"html(<!DOCTYPE html>
               font-weight:600; cursor:pointer; margin-right:8px; }
   button.sec { background:#334155; }
   #savePath { font:11px Consolas,monospace; color:#8fd3ff; word-break:break-all; }
+  #cursor   { position:fixed; width:18px; height:18px; margin:-9px 0 0 -9px;
+              border:2px solid rgba(255,255,255,.85); border-radius:50%;
+              pointer-events:none; z-index:5; display:none;
+              box-shadow:0 0 8px rgba(143,211,255,.6); }
 </style>
 </head>
 <body>
 <canvas id="glcanvas"></canvas>
+<div id="cursor"></div>
 
 <div id="topbar" class="hud">
   <span id="brand">SIGMAXX · P0 SPIKE [WebView2]</span>
@@ -153,7 +158,11 @@ addEventListener("resize",resize); resize();
 let frameDeltas=[], latSamples=[], fpsHist=[], lastFpsT=performance.now(),
     fpsCount=0, lastInputT=-1, hadInput=false;
 
-addEventListener("pointermove", ()=>{ lastInputT=performance.now(); hadInput=true; }, {passive:true});
+addEventListener("pointermove", e=>{
+  lastInputT=performance.now(); hadInput=true;
+  const c=$("cursor"); c.style.display="block";
+  c.style.left=e.clientX+"px"; c.style.top=e.clientY+"px";
+}, {passive:true});
 addEventListener("wheel",      e=>{ lastInputT=performance.now(); hadInput=true; e.preventDefault(); }, {passive:false});
 canvas.addEventListener("contextmenu", e=>e.preventDefault());
 
@@ -276,12 +285,14 @@ function finishReport(){
 async function runAll(){
   if(running) return; running=true;
   $("welcome").style.display="none"; $("results").style.display="none";
+  $("cursor").style.display="none";
   setPhase("Welcome","hands off mouse/keyboard",0); await sleep(3000);
   latSamples=[]; frameDeltas=[]; fpsHist=[];
   setPhase("A · Idle baseline","measuring refresh & pacing",.15);
   await sleep(6000);
   setPhase("B · Input storm","native SendInput active",.35);
   post({type:"inject-start"}); await sleep(15000); post({type:"inject-stop"});
+  $("cursor").style.display="none";
   setPhase("C · Command throughput","saturating main-thread edit path",.7);
   window.__opsPerSec = await throughputPhase(5000);
   setPhase("D · Compiling report","",.92); await sleep(400);
@@ -301,8 +312,8 @@ function absorbHost(m){
   if(m.type==="begin")          beginOnce();
   else if(m.type==="hostinfo")  coldStartMs=m.coldStartMs|0;
   else if(m.type==="mem")       peakMemMb=Math.max(peakMemMb,m.mb|0);
-  else if(m.type==="saved")     $("savePath").textContent="Results saved: "+m.path;
   else if(m.type==="inject-stats") window.__injectStats={ticks:m.ticks,moves:m.moves};
+  else if(m.type==="saved")     $("savePath").textContent="Results saved: "+m.path;
 }
 if(host){
   host.addEventListener("message", ev=>{
