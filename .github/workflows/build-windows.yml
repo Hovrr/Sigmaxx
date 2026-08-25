@@ -37,6 +37,25 @@ jobs:
           cmake --version | Select-Object -First 1
           ninja --version
 
+      # The runner's preinstalled C:\vcpkg has .git stripped, so manifest-mode
+      # baselines cannot be resolved from it. Replace it with a genuine shallow
+      # clone; the baseline is then derived from that exact commit below.
+      - name: Setup vcpkg (fresh git clone)
+        run: |
+          if (-not (Test-Path "$env:VCPKG_ROOT\.git")) {
+            if (Test-Path "$env:VCPKG_ROOT") {
+              Remove-Item -Recurse -Force "$env:VCPKG_ROOT" -ErrorAction SilentlyContinue
+            }
+            git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+          }
+          $sha = (git -C "$env:VCPKG_ROOT" rev-parse HEAD).Trim()
+          if (-not $sha) { throw "Failed to resolve vcpkg HEAD commit" }
+          Add-Content $env:GITHUB_ENV "VCPKG_BASELINE=$sha"
+          Write-Host "vcpkg ready @ $sha"
+
+      - name: Bootstrap vcpkg
+        run: & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+
       - name: Prime vcpkg binary-cache directory
         run: New-Item -ItemType Directory -Force -Path "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
 
@@ -49,15 +68,15 @@ jobs:
           key: vcpkg-win-x64-${{ hashFiles('vcpkg.json') }}
           restore-keys: vcpkg-win-x64-
 
-      # The manifest carries a placeholder baseline so the file stays stable for
-      # cache keys; we pin it to exactly whatever vcpkg commit the runner ships,
-      # keeping manifest resolution deterministic.
-      - name: Pin vcpkg manifest baseline to runner's vcpkg commit
+      # Substitute the manifest placeholder with the exact cloned vcpkg commit,
+      # keeping baseline <-> port-tree consistency guaranteed by construction.
+      - name: Pin vcpkg manifest baseline
         run: |
-          $sha = git -C "$env:VCPKG_ROOT" rev-parse HEAD
+          $sha = $env:VCPKG_BASELINE
+          if (-not $sha) { throw "VCPKG_BASELINE is empty" }
           (Get-Content vcpkg.json -Raw) -replace '__VCPKG_BASELINE__', $sha |
             Set-Content vcpkg.json -NoNewline
-          Write-Host "Using vcpkg baseline $sha"
+          Write-Host "Manifest baseline pinned to $sha"
 
       - name: Configure (manifest deps install automatically here)
         run: cmake --preset win-release
