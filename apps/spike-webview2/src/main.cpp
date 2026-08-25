@@ -17,8 +17,16 @@
 //    * SetVirtualHostNameToFolderMapping lives on ICoreWebView2_3+, so we QI.
 //    * Settings property is IsZoomControlEnabled; string web messages are
 //      retrieved with TryGetWebMessageAsString.
-//    * Handlers are kept as ComPtrs; .Get() is only used at the point where a
-//      raw interface pointer is consumed.
+//    * Handlers are kept as ComPtrs; .Get() is only used where consumed.
+//
+//  Input-injection contract:
+//    MOUSEEVENTF_VIRTUALDESK maps 0..65535 onto the WHOLE virtual desktop -
+//    normalize against SM_*VIRTUALSCREEN metrics, never a single monitor rect.
+//
+//  Host->page messaging contract:
+//    PostWebMessageAsJson arrives at the page ALREADY PARSED (ev.data is an
+//    object). The page also pull-syncs via {type:"ready"} after wiring its
+//    listener, so early pushes can never be lost.
 //
 //  Build requirements: UNICODE/_UNICODE are defined by CMakeLists.txt.
 // ============================================================================
@@ -34,6 +42,7 @@
 #include <WebView2.h>
 #include <WebView2EnvironmentOptions.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -67,6 +76,10 @@ fs::path                          g_exeDir, g_userDataDir, g_wwwDir;
 std::atomic<bool>                 g_injectRun{ false };
 std::thread                       g_injectThread;
 POINT                             g_cursorRestore{};
+
+// Telemetry snapshots for the page's pull-model initial sync ({type:"ready"}).
+ULONGLONG                         g_coldStartMs = 0;
+unsigned long long                g_lastMemMb   = 0;
 
 ULONGLONG NowMs() { return GetTickCount64(); }
 
@@ -158,29 +171,43 @@ void StartInjection(HWND hwnd) {
   const float ay = (rc.bottom - rc.top) * 0.33f;
   GetCursorPos(&g_cursorRestore);
 
-  HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-  MONITORINFO mi{ sizeof(mi) };
-  GetMonitorInfoW(mon, &mi);
+  // Bounds of the ENTIRE virtual desktop (all monitors). With
+  // MOUSEEVENTF_VIRTUALDESK the normalized 0..65535 space maps onto THIS
+  // rectangle - normalizing against a single monitor's rect instead launches
+  // the cursor across every attached display (QA field note #1).
+  const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+  const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+  const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+  const int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+  if (vw <= 0 || vh <= 0) { g_injectRun = false; return; }
 
-  g_injectThread = std::thread([hwnd, center, ax, ay, mi] {
+  g_injectThread = std::thread([hwnd, center, ax, ay, vx, vy, vw, vh] {
     using clock = std::chrono::steady_clock;
     const auto t0 = clock::now();
     long long tick = 0;
+
     while (g_injectRun.load(std::memory_order_relaxed)) {
       const auto next = t0 + std::chrono::milliseconds(++tick * 4);   // 250 Hz
       const double t = std::chrono::duration<double>(next - t0).count();
-      POINT p{ center.x + LONG(ax * sin(2.0 * t)),
-               center.y + LONG(ay * sin(3.0 * t + 0.7)) };
+
+      // Defence in depth: clamp the lissajous target into the client rect
+      // (re-read each tick so window moves/resizes mid-test stay contained).
+      RECT crc{};
+      GetClientRect(hwnd, &crc);
+      POINT p{
+        std::min(std::max(center.x + LONG(ax * sin(2.0 * t)), crc.left),
+                 crc.right - 1),
+        std::min(std::max(center.y + LONG(ay * sin(3.0 * t + 0.7)), crc.top),
+                 crc.bottom - 1)
+      };
       ClientToScreen(hwnd, &p);
 
       INPUT in{};                                   // absolute virtual-desktop move
       in.type = INPUT_MOUSE;
       in.mi.dwFlags =
           MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-      in.mi.dx = LONG((p.x - mi.rcMonitor.left) * 65535.0 /
-                      double(mi.rcMonitor.right - mi.rcMonitor.left));
-      in.mi.dy = LONG((p.y - mi.rcMonitor.top) * 65535.0 /
-                      double(mi.rcMonitor.bottom - mi.rcMonitor.top));
+      in.mi.dx = LONG((double(p.x - vx) / double(vw)) * 65535.0);
+      in.mi.dy = LONG((double(p.y - vy) / double(vh)) * 65535.0);
       SendInput(1, &in, sizeof(INPUT));
 
       std::this_thread::sleep_until(next);
@@ -227,7 +254,18 @@ fs::path SaveResultsFile(const std::wstring& filename,
 }
 
 void HandleWebMessage(const std::wstring& msg) {
-  if (msg.find(L"\"type\":\"inject-start\"") != std::wstring::npos) {
+  if (msg.find(L"\"type\":\"ready\"") != std::wstring::npos) {
+    // Pull-model initial sync: the page asks for current host state as soon
+    // as its listener is wired, so no push can ever be "too early".
+    wchar_t b[224];
+    swprintf_s(b,
+               L"{\"type\":\"hostinfo\",\"coldStartMs\":%llu,\"runtime\":\"%s\"}",
+               (unsigned long long)g_coldStartMs, JsonEscape(g_rtvVer).c_str());
+    PostJson(b);
+    wchar_t m[64];
+    swprintf_s(m, L"{\"type\":\"mem\",\"mb\":%llu}", g_lastMemMb);
+    PostJson(m);
+  } else if (msg.find(L"\"type\":\"inject-start\"") != std::wstring::npos) {
     StartInjection(g_hwnd);
   } else if (msg.find(L"\"type\":\"inject-stop\"") != std::wstring::npos) {
     StopInjection();
@@ -257,9 +295,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (wp == kTimerMem && g_web) {
         PROCESS_MEMORY_COUNTERS pmc{ sizeof(pmc) };
         if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
+          g_lastMemMb = pmc.WorkingSetSize / (1024ULL * 1024);
           wchar_t buf[96];
-          swprintf_s(buf, L"{\"type\":\"mem\",\"mb\":%llu}",
-                     (unsigned long long)(pmc.WorkingSetSize / (1024ULL * 1024)));
+          swprintf_s(buf, L"{\"type\":\"mem\",\"mb\":%llu}", g_lastMemMb);
           PostJson(buf);
         }
       }
@@ -332,6 +370,7 @@ HRESULT InitWebView(HWND hwnd) {
                         return S_OK;
                       }
                       const ULONGLONG cold = NowMs() - g_tEntryMs;
+                      g_coldStartMs = cold;
                       wchar_t buf[192];
                       swprintf_s(buf,
                                  L"{\"type\":\"hostinfo\",\"coldStartMs\":%llu,"
