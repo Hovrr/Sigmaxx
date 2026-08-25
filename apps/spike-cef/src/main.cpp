@@ -95,8 +95,10 @@ class SpikeClient : public CefClient {
   }
 
  private:
-  CefRefPtr<SpikeRenderHandler> render_handler_ = new SpikeRenderHandler();
-  CefRefPtr<SpikeLifeSpanHandler> life_span_handler_ = new SpikeLifeSpanHandler();
+  // CEF 151+: store members as scoped_refptr so they convert cleanly to the
+  // scoped_refptr return types of the overridden getters above.
+  scoped_refptr<SpikeRenderHandler> render_handler_ = new SpikeRenderHandler();
+  scoped_refptr<SpikeLifeSpanHandler> life_span_handler_ = new SpikeLifeSpanHandler();
   IMPLEMENT_REFCOUNTING(SpikeClient);
 };
 
