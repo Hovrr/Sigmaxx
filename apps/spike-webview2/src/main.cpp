@@ -19,9 +19,11 @@
 //      retrieved with TryGetWebMessageAsString.
 //    * Handlers are kept as ComPtrs; .Get() is only used where consumed.
 //
-//  Input-injection contract (QA round 4):
-//    Motion is pure SetCursorPos over ClientToScreen coordinates - exact
-//    physical pixels under Per-Monitor V2. No SendInput mapping involved.
+//  Input-injection contract (QA round 5):
+//    Worker thread performs NO Win32 calls: all geometry is resolved to
+//    absolute screen pixels on the UI thread and captured by value; the
+//    loop is pure math + SetCursorPos. Ticks/moves counters are published
+//    at inject-stop so failures become measurable, not silent.
 //
 //  Build requirements: UNICODE/_UNICODE are defined by CMakeLists.txt.
 // ============================================================================
@@ -75,6 +77,10 @@ POINT                             g_cursorRestore{};
 // Telemetry snapshots for the page's pull-model initial sync ({type:"ready"}).
 ULONGLONG                         g_coldStartMs = 0;
 unsigned long long                g_lastMemMb   = 0;
+
+// Injection health counters (published to the page at inject-stop).
+std::atomic<unsigned long long>   g_injectTicks{ 0 };
+std::atomic<unsigned long long>   g_injectMoves{ 0 };
 
 ULONGLONG NowMs() { return GetTickCount64(); }
 
@@ -156,13 +162,12 @@ void AlertHr(const wchar_t* what, HRESULT hr) {
 }
 
 // ------------------------------------------------------- input injection
-// Strategy (QA round 4, FINAL): drive the cursor with SetCursorPos only.
-// SendInput's absolute mode needs physical desktop bounds (breaks on
-// mixed-DPI multi-monitor) and its relative mode feeds 'mickeys' through
-// pointer-acceleration curves (small deltas get swallowed -> dead cursor).
-// SetCursorPos consumes exactly the coordinates ClientToScreen produces, so
-// there is no mapping layer left to get wrong, and the resulting WM_MOUSEMOVE
-// stream reaches the WebView as genuine pointer activity.
+// Strategy (QA round 5): ZERO Win32 calls inside the worker thread.
+// All geometry - screen-space center, amplitudes, clamp bounds - is resolved
+// HERE on the main UI thread via ClientToScreen (physical pixels under
+// Per-Monitor V2). The thread captures plain numbers and only computes math
+// plus SetCursorPos. Counters published via atomics make any residual
+// interference visible in the QA report instead of silent.
 void StartInjection(HWND hwnd) {
   if (g_injectRun.exchange(true)) return;
 
@@ -172,41 +177,42 @@ void StartInjection(HWND hwnd) {
     return;
   }
   const POINT center{ (rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2 };
-  const float ax = (rc.right - rc.left) * 0.30f;
-  const float ay = (rc.bottom - rc.top) * 0.30f;
+  const int ax = int((rc.right - rc.left) * 0.30);
+  const int ay = int((rc.bottom - rc.top) * 0.30);
   GetCursorPos(&g_cursorRestore);
 
-  POINT start{ center };
-  ClientToScreen(hwnd, &start);
-  SetCursorPos(start.x, start.y);            // deterministic anchor
+  // Resolve EVERYTHING to absolute screen pixels now (main/UI thread).
+  POINT c0{ center.x, center.y };
+  POINT lo{ rc.left, rc.top };
+  POINT hi{ rc.right - 1, rc.bottom - 1 };
+  ClientToScreen(hwnd, &c0);
+  ClientToScreen(hwnd, &lo);
+  ClientToScreen(hwnd, &hi);
 
-  g_injectThread = std::thread([hwnd, center, ax, ay] {
+  g_injectTicks = 0;
+  g_injectMoves = 0;
+  SetCursorPos(c0.x, c0.y);                  // deterministic anchor
+
+  g_injectThread = std::thread([c0, ax, ay, lo, hi] {
     using clock = std::chrono::steady_clock;
     const auto t0 = clock::now();
     long long tick = 0;
+    unsigned long long moves = 0;
 
     while (g_injectRun.load(std::memory_order_relaxed)) {
       const auto next = t0 + std::chrono::milliseconds(++tick * 4);   // 250 Hz
       const double t = std::chrono::duration<double>(next - t0).count();
 
-      RECT crc{};
-      if (!GetClientRect(hwnd, &crc) || crc.right <= crc.left ||
-          crc.bottom <= crc.top)
-        break;                                   // window gone / minimized
+      // Pure math against captured numbers - no Win32 calls in this loop.
+      const int x = std::min(std::max(c0.x + int(ax * sin(2.0 * t)), lo.x), hi.x);
+      const int y = std::min(std::max(c0.y + int(ay * sin(3.0 * t + 0.7)), lo.y), hi.y);
 
-      // Lissajous target clamped into the client rect, converted to screen
-      // space, applied verbatim - one coordinate space, end to end.
-      POINT p{
-        std::min(std::max(center.x + LONG(ax * sin(2.0 * t)), crc.left),
-                 crc.right - 1),
-        std::min(std::max(center.y + LONG(ay * sin(3.0 * t + 0.7)), crc.top),
-                 crc.bottom - 1)
-      };
-      ClientToScreen(hwnd, &p);
-      SetCursorPos(p.x, p.y);
+      if (SetCursorPos(x, y)) ++moves;
+      ++g_injectTicks;
 
       std::this_thread::sleep_until(next);
     }
+    g_injectMoves = moves;
   });
 }
 
@@ -214,6 +220,15 @@ void StopInjection() {
   if (!g_injectRun.exchange(false)) return;
   if (g_injectThread.joinable()) g_injectThread.join();
   SetCursorPos(g_cursorRestore.x, g_cursorRestore.y);
+
+  // Report injection health on the UI thread (WebView2 calls stay off the
+  // worker). The page folds this into its results JSON.
+  wchar_t b[112];
+  swprintf_s(b,
+             L"{\"type\":\"inject-stats\",\"ticks\":%llu,\"moves\":%llu}",
+             (unsigned long long)g_injectTicks.load(),
+             (unsigned long long)g_injectMoves.load());
+  PostJson(b);
 }
 
 // ------------------------------------------------------------ persistence
