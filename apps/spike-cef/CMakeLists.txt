@@ -18,7 +18,10 @@ set_target_properties(spike_cef PROPERTIES
 
 target_include_directories(spike_cef PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
-  ${SX_CEF_ROOT})
+  ${SX_CEF_ROOT}
+  # The benchmark page is the FROZEN parity instrument (ADR-0001): consume
+  # Spike A's copy verbatim rather than duplicating it.
+  ${CMAKE_CURRENT_SOURCE_DIR}/../spike-webview2/src)
 
 target_compile_features(spike_cef PRIVATE cxx_std_20)
 
@@ -33,9 +36,15 @@ target_link_libraries(spike_cef PRIVATE
   sx::cef
   user32 gdi32 ole32 advapi32 uuid psapi)
 
-# Ship the CEF runtime beside the exe.
+# Ship the CEF runtime beside the exe. Existence-guarded: distribution
+# contents drift between Chromium majors; never fail the build over a DLL
+# that this particular minimal archive chose not to ship.
 foreach(_f ${SX_CEF_RUNTIME_FILES})
-  add_custom_command(TARGET spike_cef POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_f}" "$<TARGET_FILE_DIR:spike_cef>")
+  if(EXISTS "${_f}")
+    add_custom_command(TARGET spike_cef POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${_f}" "$<TARGET_FILE_DIR:spike_cef>")
+  else()
+    message(STATUS "CEF runtime file absent in this dist, skipping: ${_f}")
+  endif()
 endforeach()
