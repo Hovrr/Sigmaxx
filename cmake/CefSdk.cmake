@@ -124,6 +124,18 @@ function(sx_setup_cef)
   add_library(libcef_dll_wrapper STATIC ${_wrapper_src})
   target_include_directories(libcef_dll_wrapper PUBLIC "${_sdk}")
   target_compile_features(libcef_dll_wrapper PUBLIC cxx_std_17)
+
+  # Wrapper TUs pull in <windows.h> (directly or via CEF internals); without
+  # guards its legacy min/max function-like macros mangle expressions like
+  # std::numeric_limits<T>::max() -> warning C4003 + error C2589
+  # "'(' : illegal token on right side of '::'". NOMINMAX removes the macros;
+  # WIN32_LEAN_AND_MEAN trims the rest of the legacy surface. PRIVATE scope:
+  # the collision is inside the wrapper's own compilation; consumers guard
+  # themselves (spike_cef defines both in main.cpp).
+  target_compile_definitions(libcef_dll_wrapper PRIVATE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN)
+
   if(MSVC)
     set_target_properties(libcef_dll_wrapper PROPERTIES
       MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
