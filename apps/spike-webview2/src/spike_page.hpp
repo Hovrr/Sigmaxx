@@ -158,12 +158,20 @@ addEventListener("resize",resize); resize();
 let frameDeltas=[], latSamples=[], fpsHist=[], lastFpsT=performance.now(),
     fpsCount=0, lastInputT=-1, hadInput=false;
 
+// Record the event's OWN timeStamp (same monotonic clock as performance.now()).
+// Measuring later against the rAF callback's vsync `now` would go NEGATIVE
+// for events that arrive between frame start and callback execution - which
+// silently discarded every injected sample (QA round 8).
 addEventListener("pointermove", e=>{
-  lastInputT=performance.now(); hadInput=true;
+  lastInputT = (e.timeStamp && e.timeStamp > 0) ? e.timeStamp : performance.now();
+  hadInput = true;
   const c=$("cursor"); c.style.display="block";
   c.style.left=e.clientX+"px"; c.style.top=e.clientY+"px";
 }, {passive:true});
-addEventListener("wheel",      e=>{ lastInputT=performance.now(); hadInput=true; e.preventDefault(); }, {passive:false});
+addEventListener("wheel", e=>{
+  lastInputT = (e.timeStamp && e.timeStamp > 0) ? e.timeStamp : performance.now();
+  hadInput = true; e.preventDefault();
+}, {passive:false});
 canvas.addEventListener("contextmenu", e=>e.preventDefault());
 
 /* ============================= render loop =========================== */
@@ -171,7 +179,15 @@ let prevT=performance.now(), simT=0;
 function frame(now){
   const dt = now-prevT; prevT = now; simT += dt/1000;
   frameDeltas.push(dt); if(frameDeltas.length>3000) frameDeltas.shift();
-  if(hadInput){ const l=now-lastInputT; if(l>=0&&l<120) latSamples.push(l); hadInput=false; }
+  
+  // Input→paint latency: measure against performance.now() AT CALLBACK TIME,
+  // never the rAF vsync timestamp (it can predate the event and go negative).
+  if(hadInput){
+    const l = performance.now() - lastInputT;
+    if(l>=0 && l<120) latSamples.push(l);
+    hadInput=false;
+  }
+  
   if(latSamples.length>4000) latSamples.splice(0,latSamples.length-4000);
   fpsCount++;
   if(now-lastFpsT>=1000){ fpsHist.push(fpsCount*1000/(now-lastFpsT)); if(fpsHist.length>240)fpsHist.shift();
