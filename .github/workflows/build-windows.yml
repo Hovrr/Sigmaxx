@@ -1,0 +1,80 @@
+name: build-windows
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VCPKG_ROOT: C:\vcpkg
+  VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
+
+jobs:
+  spike-webview2:
+    name: Phase 0 · WebView2 Spike (x64)
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain versions
+        run: |
+          Write-Host "MSVC:"; cl 2>&1 | Select-Object -First 1
+          cmake --version | Select-Object -First 1
+
+      # MSVC v143 environment for the Ninja generator
+      - name: Setup MSVC (v143)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Prime vcpkg binary-cache directory
+        run: New-Item -ItemType Directory -Force -Path "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
+
+      - name: Cache vcpkg artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}\vcpkg-bincache
+            C:\vcpkg\downloads
+          key: vcpkg-win-x64-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-win-x64-
+
+      # The manifest carries a placeholder baseline so the file stays stable for
+      # cache keys; we pin it to exactly whatever vcpkg commit the runner ships,
+      # keeping manifest resolution deterministic.
+      - name: Pin vcpkg manifest baseline to runner's vcpkg commit
+        run: |
+          $sha = git -C "$env:VCPKG_ROOT" rev-parse HEAD
+          (Get-Content vcpkg.json -Raw) -replace '__VCPKG_BASELINE__', $sha |
+            Set-Content vcpkg.json -NoNewline
+          Write-Host "Using vcpkg baseline $sha"
+
+      - name: Configure (manifest deps install automatically here)
+        run: cmake --preset win-release
+
+      - name: Build
+        run: cmake --build --preset win-release --parallel
+
+      - name: Stage artifacts
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item build\bin\SigmaxxPhase0-WebView2.exe artifact\
+          if (Test-Path build\bin\WebView2Loader.dll) {
+            Copy-Item build\bin\WebView2Loader.dll artifact\
+          }
+          Get-ChildItem artifact | Format-Table Name,Length
+
+      - name: Upload Sigmaxx-Phase0-WebView2-Spike
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sigmaxx-Phase0-WebView2-Spike
+          path: artifact/
+          retention-days: 14
+          if-no-files-found: error
