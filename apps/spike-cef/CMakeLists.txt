@@ -34,6 +34,11 @@ target_compile_definitions(spike_cef PRIVATE UNICODE _UNICODE)
 target_link_libraries(spike_cef PRIVATE
   sx_eal
   sx::cef
+  # CEF's C++ API (CefInitialize, CefBrowserHost::CreateBrowser, ...) lives
+  # in the wrapper static lib built by CefSdk.cmake; it is also pulled
+  # transitively via sx::cef, listed explicitly so the LNK2019 fix stays
+  # visible at the point of use.
+  libcef_dll_wrapper
   user32 gdi32 ole32 advapi32 uuid psapi)
 
 # Ship the CEF runtime beside the exe. Existence-guarded: distribution

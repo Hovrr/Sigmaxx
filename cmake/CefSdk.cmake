@@ -2,7 +2,7 @@
 #
 # Usage (all optional; everything is inert unless SX_ENABLE_CEF_SPIKE=ON):
 #   include(CefSdk)                 # after list(APPEND CMAKE_MODULE_PATH cmake/)
-#   sx_setup_cef()                  # -> sx::cef target + SX_CEF_RUNTIME_FILES
+#   sx_setup_cef()                  # -> sx::cef + libcef_dll_wrapper + SX_CEF_RUNTIME_FILES
 #
 # Strategy: fetch the official cef-builds index.json once (~10 MB), resolve the
 # newest STABLE windows64 "minimal" distribution, download (~160 MB) into
@@ -107,6 +107,30 @@ function(sx_setup_cef)
   set_target_properties(sx::cef PROPERTIES
     IMPORTED_LOCATION             "${_sdk}/Release/libcef.lib"
     INTERFACE_INCLUDE_DIRECTORIES "${_sdk}")
+
+  # -- C++ wrapper (fixes LNK2019 on CefInitialize/CreateBrowser/etc.) -----
+  # libcef.lib exports only the flat C API; the C++ layer (CefInitialize,
+  # CefExecuteProcess, CefShutdown, CefDoMessageLoopWork,
+  # CefBrowserHost::CreateBrowser, ...) is implemented in the wrapper sources
+  # under <sdk>/libcef_dll and must be compiled into the link. We build just
+  # the wrapper instead of add_subdirectory(<sdk>) because the SDK's own
+  # CMake also declares cefclient/cefsimple targets we neither want nor can
+  # configure headlessly here.
+  #
+  # NOTE: the wrapper MUST use the same MSVC runtime as its consumers
+  # (MultiThreadedDLL == /MD, matching spike_cef) or the link fails with
+  # LNK2038 runtime-mismatch before symbol resolution is even reached.
+  file(GLOB_RECURSE _wrapper_src CONFIGURE_DEPENDS "${_sdk}/libcef_dll/*.cc")
+  add_library(libcef_dll_wrapper STATIC ${_wrapper_src})
+  target_include_directories(libcef_dll_wrapper PUBLIC "${_sdk}")
+  target_compile_features(libcef_dll_wrapper PUBLIC cxx_std_17)
+  if(MSVC)
+    set_target_properties(libcef_dll_wrapper PROPERTIES
+      MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+  endif()
+
+  # Every sx::cef consumer now pulls the wrapper automatically.
+  target_link_libraries(sx::cef INTERFACE libcef_dll_wrapper)
 
   set(SX_CEF_ROOT       "${_sdk}"       PARENT_SCOPE)
   set(SX_CEF_RUNTIME_FILES
