@@ -23,16 +23,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Toolchain versions
-        run: |
-          Write-Host "MSVC:"; cl 2>&1 | Select-Object -First 1
-          cmake --version | Select-Object -First 1
-
-      # MSVC v143 environment for the Ninja generator
+      # MSVC v143 environment for the Ninja generator.
+      # Must run BEFORE any step that touches cl/link.
       - name: Setup MSVC (v143)
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+
+      - name: Toolchain versions (informational only)
+        run: |
+          try   { Write-Host ("MSVC: " + (& cl 2>&1 | Select-Object -First 1)) }
+          catch { Write-Host "MSVC probe failed (non-fatal): $_" }
+          cmake --version | Select-Object -First 1
+          ninja --version
 
       - name: Prime vcpkg binary-cache directory
         run: New-Item -ItemType Directory -Force -Path "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
