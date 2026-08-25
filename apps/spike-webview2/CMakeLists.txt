@@ -14,6 +14,10 @@ set_target_properties(spike_webview2 PROPERTIES
 target_include_directories(spike_webview2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_features(spike_webview2 PRIVATE cxx_std_20)
 
+# Win32 GUI code uses the W family exclusively; make the macros match so
+# IDC_ARROW / IDI_APPLICATION resolve to wide variants.
+target_compile_definitions(spike_webview2 PRIVATE UNICODE _UNICODE)
+
 if(MSVC)
   target_compile_options(spike_webview2 PRIVATE /W4 /permissive- /utf-8)
 endif()
