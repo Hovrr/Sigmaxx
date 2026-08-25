@@ -19,14 +19,10 @@
 //      retrieved with TryGetWebMessageAsString.
 //    * Handlers are kept as ComPtrs; .Get() is only used where consumed.
 //
-//  Input-injection contract:
-//    MOUSEEVENTF_VIRTUALDESK maps 0..65535 onto the WHOLE virtual desktop -
-//    normalize against SM_*VIRTUALSCREEN metrics, never a single monitor rect.
-//
-//  Host->page messaging contract:
-//    PostWebMessageAsJson arrives at the page ALREADY PARSED (ev.data is an
-//    object). The page also pull-syncs via {type:"ready"} after wiring its
-//    listener, so early pushes can never be lost.
+//  Input-injection contract (QA round 3):
+//    Motion uses RELATIVE SendInput deltas anchored by SetCursorPos - no
+//    absolute 0..65535 mapping, which is unreliable across mixed-DPI
+//    monitors. A watchdog snaps the cursor back if it leaves the window.
 //
 //  Build requirements: UNICODE/_UNICODE are defined by CMakeLists.txt.
 // ============================================================================
@@ -161,39 +157,47 @@ void AlertHr(const wchar_t* what, HRESULT hr) {
 }
 
 // ------------------------------------------------------- input injection
+// Strategy (QA round 3): avoid ABSOLUTE SendInput mapping altogether.
+// MOUSEEVENTF_ABSOLUTE(+VIRTUALDESK) demands exact physical-pixel knowledge of
+// the desktop bounds, which breaks on mixed-DPI multi-monitor layouts (QA:
+// v1 flew across screens, v2 pinned dead). Instead we:
+//   1. anchor the cursor at the window center via SetCursorPos - same
+//      coordinate space as ClientToScreen, immune to DPI/virtual-desk algebra,
+//   2. drive motion with RELATIVE SendInput deltas along the lissajous path,
+//   3. run a containment watchdog that snaps the cursor back to the window
+//      center whenever it escapes the window's own screen rectangle.
 void StartInjection(HWND hwnd) {
   if (g_injectRun.exchange(true)) return;
 
   RECT rc{};
-  GetClientRect(hwnd, &rc);
+  if (!GetClientRect(hwnd, &rc) || rc.right <= rc.left || rc.bottom <= rc.top) {
+    g_injectRun = false;
+    return;
+  }
   const POINT center{ (rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2 };
-  const float ax = (rc.right - rc.left) * 0.33f;
-  const float ay = (rc.bottom - rc.top) * 0.33f;
+  const float ax = (rc.right - rc.left) * 0.30f;
+  const float ay = (rc.bottom - rc.top) * 0.30f;
   GetCursorPos(&g_cursorRestore);
 
-  // Bounds of the ENTIRE virtual desktop (all monitors). With
-  // MOUSEEVENTF_VIRTUALDESK the normalized 0..65535 space maps onto THIS
-  // rectangle - normalizing against a single monitor's rect instead launches
-  // the cursor across every attached display (QA field note #1).
-  const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-  const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-  const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-  const int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-  if (vw <= 0 || vh <= 0) { g_injectRun = false; return; }
+  POINT start{ center };
+  ClientToScreen(hwnd, &start);
+  SetCursorPos(start.x, start.y);            // deterministic anchor
 
-  g_injectThread = std::thread([hwnd, center, ax, ay, vx, vy, vw, vh] {
+  g_injectThread = std::thread([hwnd, center, ax, ay, start] {
     using clock = std::chrono::steady_clock;
     const auto t0 = clock::now();
     long long tick = 0;
+    POINT prev = start;
 
     while (g_injectRun.load(std::memory_order_relaxed)) {
       const auto next = t0 + std::chrono::milliseconds(++tick * 4);   // 250 Hz
       const double t = std::chrono::duration<double>(next - t0).count();
 
-      // Defence in depth: clamp the lissajous target into the client rect
-      // (re-read each tick so window moves/resizes mid-test stay contained).
       RECT crc{};
-      GetClientRect(hwnd, &crc);
+      if (!GetClientRect(hwnd, &crc) || crc.right <= crc.left ||
+          crc.bottom <= crc.top)
+        break;                                   // window gone / minimized
+
       POINT p{
         std::min(std::max(center.x + LONG(ax * sin(2.0 * t)), crc.left),
                  crc.right - 1),
@@ -202,13 +206,31 @@ void StartInjection(HWND hwnd) {
       };
       ClientToScreen(hwnd, &p);
 
-      INPUT in{};                                   // absolute virtual-desktop move
-      in.type = INPUT_MOUSE;
-      in.mi.dwFlags =
-          MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-      in.mi.dx = LONG((double(p.x - vx) / double(vw)) * 65535.0);
-      in.mi.dy = LONG((double(p.y - vy) / double(vh)) * 65535.0);
-      SendInput(1, &in, sizeof(INPUT));
+      const LONG dx = p.x - prev.x;
+      const LONG dy = p.y - prev.y;
+      if (dx != 0 || dy != 0) {
+        INPUT in{};
+        in.type = INPUT_MOUSE;
+        in.mi.dwFlags = MOUSEEVENTF_MOVE;        // RELATIVE: no DPI algebra
+        in.mi.dx = dx;
+        in.mi.dy = dy;
+        if (SendInput(1, &in, sizeof(INPUT)) == 1) prev = p;
+      }
+
+      // Containment watchdog (~every 128 ms): OS pointer-acceleration may
+      // distort relative deltas; if we ever leave the window rect, snap back.
+      if ((tick % 32) == 0) {
+        POINT cur{};
+        if (GetCursorPos(&cur)) {
+          RECT wr{};
+          if (GetWindowRect(hwnd, &wr) && !PtInRect(&wr, cur)) {
+            POINT c{ center };
+            ClientToScreen(hwnd, &c);
+            SetCursorPos(c.x, c.y);
+            prev = c;
+          }
+        }
+      }
 
       std::this_thread::sleep_until(next);
     }
