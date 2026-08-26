@@ -35,6 +35,8 @@
 
 #include <include/cef_app.h>
 #include <include/cef_browser.h>
+#include <include/cef_command_line.h>
+#include <include/cef_browser_process_handler.h>
 #include <include/cef_client.h>
 #include <include/cef_life_span_handler.h>
 #include <include/cef_render_handler.h>
@@ -76,6 +78,20 @@ void ReportFatal(const wchar_t* what, int exitCode) {
   MessageBoxW(nullptr, msg, L"Sigmaxx Phase 0 - Fatal Error",
               MB_ICONERROR | MB_OK | MB_SETFOREGROUND);
 }
+
+class SpikeApp : public CefApp, public CefBrowserProcessHandler {
+ public:
+  scoped_refptr<CefBrowserProcessHandler> GetBrowserProcessHandler() override {
+    return this;
+  }
+  void OnBeforeCommandLineProcessing(const CefString& process_type, scoped_refptr<CefCommandLine> command_line) override {
+    command_line->AppendSwitchWithValue("lang", "en-US");
+    command_line->AppendSwitch("disable-gpu");
+    command_line->AppendSwitch("disable-gpu-compositing");
+  }
+ private:
+  IMPLEMENT_REFCOUNTING(SpikeApp);
+};
 
 // Minimal render handler: OSR geometry + frame counter (shared-texture path
 // lands in the next iteration per the plan doc).
@@ -170,7 +186,7 @@ void DumpBenchmarkPage(const std::wstring& dir) {
 
 int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   CefMainArgs main_args(GetModuleHandleW(nullptr));
-  scoped_refptr<CefApp> app;
+  scoped_refptr<CefApp> app = new SpikeApp();
 
   // Child-process handoff (GPU/renderer helpers re-enter here). NOTE: this is
   // a silent exit path BY DESIGN - a >= 0 return means "I am a helper
