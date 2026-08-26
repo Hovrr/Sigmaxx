@@ -219,8 +219,9 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   // CHECK()ed inside the resource manager. Pin en-US explicitly and point
   // CEF at the locales/ tree shipped beside the exe by spike_cef's
   // POST_BUILD copy_directory step.
-  CefString(&settings.locale) = L"en-US";
+  CefString(&settings.locale).FromString("en-US");
   CefString(&settings.locales_dir_path) = base + L"\\locales";
+  CefString(&settings.resources_dir_path) = base;
 
   // CEF creates the cache directory early during initialization, so a failure
   // here matches the observed "cef-cache exists, no window, instant exit"
@@ -260,7 +261,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     return 3;
   }
   g_hwnd = hwnd;
-  ShowWindow(hwnd, nCmdShow);
+  ShowWindow(hwnd, SW_SHOW);
 
   DumpBenchmarkPage(base + L"\\www");
 

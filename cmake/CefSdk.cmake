@@ -186,6 +186,8 @@ function(sx_setup_cef)
       "${_sdk}/Release/libEGL.dll"
       "${_sdk}/Release/libGLESv2.dll"
       "${_sdk}/Release/vk_swiftshader.dll"
+      "${_sdk}/Release/vk_swiftshader_icd.json"
+      "${_sdk}/Release/vulkan-1.dll"
       "${_sdk}/Release/snapshot_blob.bin"
       "${_sdk}/Release/v8_context_snapshot.bin"
       "${_sdk}/Resources/icudtl.dat"
