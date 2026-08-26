@@ -16,6 +16,12 @@
 //      scoped_refptr<T>, NOT CefRefPtr<T> - overrides must match exactly.
 //    * WIN32_LEAN_AND_MEAN hides CoInitializeEx -> include <objbase.h>.
 //
+//  Diagnostics: every early-return failure path in wWinMain raises a blocking
+//  MessageBoxW (ReportFatal) instead of exiting invisibly. Process exit codes:
+//    1 CoInitializeEx · 2 CefInitialize · 3 CreateWindowExW ·
+//    4 RegisterClassExW. (A >= 0 return from CefExecuteProcess is the normal
+//    child-process handoff, not a failure.)
+//
 //  Built ONLY when -DSX_ENABLE_CEF_SPIKE=ON (see apps/spike-cef/CMakeLists.txt).
 // ============================================================================
 
@@ -32,6 +38,7 @@
 #include <include/wrapper/cef_helpers.h>
 
 #include <atomic>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 
@@ -45,6 +52,27 @@ constexpr UINT kTimerPump = 1;
 HWND g_hwnd = nullptr;
 scoped_refptr<CefBrowser> g_browser;   // CEF 151+: public API uses Chromium's scoped_refptr
 std::atomic<unsigned long long> g_paintFrames{ 0 };
+
+// Blocking fatal-error dialog for wWinMain's early-return paths. A silent
+// "create cef-cache then vanish" launch is undiagnosable; this surfaces the
+// failing step plus the Win32 error text on screen before the process exits.
+void ReportFatal(const wchar_t* what, int exitCode) {
+  const DWORD err = GetLastError();
+  wchar_t sys[256] = L"<no system message>";
+  FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                 nullptr, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                 sys, 255, nullptr);
+  wchar_t msg[640];
+  swprintf_s(msg,
+             L"%s failed.\n\n"
+             L"Win32 error %lu: %s\n\n"
+             L"The process will exit (code %d).\n\n"
+             L"Typical causes: CEF runtime files (libcef.dll, *.pak, "
+             L"icudtl.dat, snapshot/v8_context blobs) missing next to the exe.",
+             what, (unsigned long)err, sys, exitCode);
+  MessageBoxW(nullptr, msg, L"Sigmaxx Phase 0 - Fatal Error",
+              MB_ICONERROR | MB_OK | MB_SETFOREGROUND);
+}
 
 // Minimal render handler: OSR geometry + frame counter (shared-texture path
 // lands in the next iteration per the plan doc).
@@ -141,10 +169,15 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   CefMainArgs main_args(GetModuleHandleW(nullptr));
   scoped_refptr<CefApp> app;
 
-  // Child-process handoff (GPU/renderer helpers re-enter here).
+  // Child-process handoff (GPU/renderer helpers re-enter here). NOTE: this is
+  // a silent exit path BY DESIGN - a >= 0 return means "I am a helper
+  // process"; the shell itself never takes it.
   if (CefExecuteProcess(main_args, app, nullptr) >= 0) return 0;
 
-  if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return 1;
+  if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
+    ReportFatal(L"CoInitializeEx", 1);
+    return 1;
+  }
 
   wchar_t exePath[MAX_PATH]{};
   GetModuleFileNameW(nullptr, exePath, MAX_PATH);
@@ -156,7 +189,13 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   CefString(&settings.cache_path) = base + L"\\cef-cache";
   CefString(&settings.browser_subprocess_path) = exePath;
 
-  if (!CefInitialize(main_args, settings, app, nullptr)) return 2;
+  // CEF creates the cache directory early during initialization, so a failure
+  // here matches the observed "cef-cache exists, no window, instant exit"
+  // symptom. Surface the real cause instead of returning invisibly.
+  if (!CefInitialize(main_args, settings, app, nullptr)) {
+    ReportFatal(L"CefInitialize", 2);
+    return 2;
+  }
 
   WNDCLASSEXW wc{ sizeof(wc) };
   wc.lpfnWndProc   = WndProc;
@@ -164,7 +203,16 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
   wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
   wc.lpszClassName = kWndClass;
-  RegisterClassExW(&wc);
+
+  // Registration was present but UNCHECKED: a failed RegisterClassExW makes
+  // the CreateWindowExW below fail with ERROR_CANNOT_FIND_WND_CLASS, so guard
+  // it explicitly and report it independently of window creation.
+  if (!RegisterClassExW(&wc)) {
+    ReportFatal(L"RegisterClassExW", 4);
+    CefShutdown();
+    CoUninitialize();
+    return 4;
+  }
 
   RECT rd{ 0, 0, 1280, 840 };
   AdjustWindowRect(&rd, WS_OVERLAPPEDWINDOW, FALSE);
@@ -172,7 +220,12 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
       L"Sigmaxx - Phase 0 - CEF-OSR Spike (WIP)", WS_OVERLAPPEDWINDOW,
       CW_USEDEFAULT, CW_USEDEFAULT, rd.right - rd.left, rd.bottom - rd.top,
       nullptr, nullptr, hInst, nullptr);
-  if (!hwnd) return 3;
+  if (!hwnd) {
+    ReportFatal(L"CreateWindowExW", 3);
+    CefShutdown();
+    CoUninitialize();
+    return 3;
+  }
   g_hwnd = hwnd;
   ShowWindow(hwnd, nCmdShow);
 
