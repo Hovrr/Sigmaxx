@@ -53,3 +53,12 @@ foreach(_f ${SX_CEF_RUNTIME_FILES})
     message(STATUS "CEF runtime file absent in this dist, skipping: ${_f}")
   endif()
 endforeach()
+
+# Ship the entire locales/ directory (QA r-B4): Chromium strictly requires
+# locales/en-US.pak to initialize; a missing tree makes libcef.dll abort()
+# instantly. This is a directory tree, so it cannot ride the per-file
+# copy_if_different loop above - copy_directory handles it wholesale.
+add_custom_command(TARGET spike_cef POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${SX_CEF_ROOT}/Resources/locales"
+          "$<TARGET_FILE_DIR:spike_cef>/locales")

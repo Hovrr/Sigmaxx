@@ -170,6 +170,12 @@ function(sx_setup_cef)
   # made the existence-guarded copy loop skip them silently -> libcef.dll
   # abort()s during V8 init at startup (process dies before any UI can show).
   # Do NOT "fix" these two back to Resources/.
+  #
+  # Core pak resources (QA r-B4): Chromium's resource manager requires
+  # cef.pak + the scale-specific paks at startup; without them libcef.dll
+  # abort()s immediately (silent zombie process). The locales/ directory is
+  # copied separately by spike_cef (copy_directory) since it is a tree,
+  # not individual files.
   set(SX_CEF_RUNTIME_FILES
       "${_sdk}/Release/libcef.dll"
       "${_sdk}/Release/chrome_elf.dll"
@@ -181,5 +187,9 @@ function(sx_setup_cef)
       "${_sdk}/Release/v8_context_snapshot.bin"
       "${_sdk}/Resources/icudtl.dat"
       "${_sdk}/Resources/resources.pak"
+      "${_sdk}/Resources/cef.pak"
+      "${_sdk}/Resources/cef_100_percent.pak"
+      "${_sdk}/Resources/cef_200_percent.pak"
+      "${_sdk}/Resources/cef_extensions.pak"
       PARENT_SCOPE)
 endfunction()
