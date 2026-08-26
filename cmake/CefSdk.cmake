@@ -163,6 +163,13 @@ function(sx_setup_cef)
   target_link_libraries(sx::cef INTERFACE libcef_dll_wrapper)
 
   set(SX_CEF_ROOT       "${_sdk}"       PARENT_SCOPE)
+  # Runtime files shipped beside the exe by spike_cef's POST_BUILD step.
+  #
+  # SDK drift (QA r-B3): in modern distributions (CEF 151+) the V8 snapshot
+  # binaries moved from Resources/ to Release/. Pointing them at Resources/
+  # made the existence-guarded copy loop skip them silently -> libcef.dll
+  # abort()s during V8 init at startup (process dies before any UI can show).
+  # Do NOT "fix" these two back to Resources/.
   set(SX_CEF_RUNTIME_FILES
       "${_sdk}/Release/libcef.dll"
       "${_sdk}/Release/chrome_elf.dll"
@@ -170,9 +177,9 @@ function(sx_setup_cef)
       "${_sdk}/Release/libEGL.dll"
       "${_sdk}/Release/libGLESv2.dll"
       "${_sdk}/Release/vk_swiftshader.dll"
+      "${_sdk}/Release/snapshot_blob.bin"
+      "${_sdk}/Release/v8_context_snapshot.bin"
       "${_sdk}/Resources/icudtl.dat"
       "${_sdk}/Resources/resources.pak"
-      "${_sdk}/Resources/snapshot_blob.bin"
-      "${_sdk}/Resources/v8_context_snapshot.bin"
       PARENT_SCOPE)
 endfunction()
