@@ -21,6 +21,9 @@
 //    1 CoInitializeEx · 2 CefInitialize · 3 CreateWindowExW ·
 //    4 RegisterClassExW. (A >= 0 return from CefExecuteProcess is the normal
 //    child-process handoff, not a failure.)
+//    Silent abort()s inside libcef.dll bypass any UI entirely; CEF logging is
+//    therefore enabled (LOGSEVERITY_INFO -> debug.log beside the exe) so
+//    Chromium itself records WHY a CHECK() fired.
 //
 //  Built ONLY when -DSX_ENABLE_CEF_SPIKE=ON (see apps/spike-cef/CMakeLists.txt).
 // ============================================================================
@@ -189,6 +192,12 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   CefString(&settings.cache_path) = base + L"\\cef-cache";
   CefString(&settings.browser_subprocess_path) = exePath;
 
+  // Crash forensics (QA r-B5): fatal CHECK() failures inside Chromium call
+  // abort() and kill the process before any UI can appear. Route CEF's own
+  // log to disk so the real cause lands in debug.log beside the exe.
+  settings.log_severity = LOGSEVERITY_INFO;
+  CefString(&settings.log_file) = base + L"\\debug.log";
+
   // CEF creates the cache directory early during initialization, so a failure
   // here matches the observed "cef-cache exists, no window, instant exit"
   // symptom. Surface the real cause instead of returning invisibly.
@@ -232,7 +241,10 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   DumpBenchmarkPage(base + L"\\www");
 
   CefWindowInfo info;
-  info.SetAsWindowless(nullptr);                 // true OSR; compositor next step
+  // Pass the host window (QA r-B5): modern OSR expects a parent HWND; with
+  // nullptr the windowless browser creation can fail silently inside
+  // libcef.dll. Binding it also anchors future input/focus routing.
+  info.SetAsWindowless(hwnd);
   CefBrowserSettings bsettings;
   bsettings.windowless_frame_rate = 120;
 
