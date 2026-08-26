@@ -198,6 +198,14 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   settings.log_severity = LOGSEVERITY_INFO;
   CefString(&settings.log_file) = base + L"\\debug.log";
 
+  // Locale pinning (QA r-B6, confirmed by debug.log): Chromium failed to
+  // resolve a default locale ("locale_file_path.empty() for locale ") and
+  // CHECK()ed inside the resource manager. Pin en-US explicitly and point
+  // CEF at the locales/ tree shipped beside the exe by spike_cef's
+  // POST_BUILD copy_directory step.
+  CefString(&settings.locale) = L"en-US";
+  CefString(&settings.locales_dir_path) = base + L"\\locales";
+
   // CEF creates the cache directory early during initialization, so a failure
   // here matches the observed "cef-cache exists, no window, instant exit"
   // symptom. Surface the real cause instead of returning invisibly.
