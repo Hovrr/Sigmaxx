@@ -85,9 +85,9 @@ class SpikeApp : public CefApp, public CefBrowserProcessHandler {
     return this;
   }
   void OnBeforeCommandLineProcessing(const CefString& process_type, scoped_refptr<CefCommandLine> command_line) override {
+    // OSR REQUIRES the GPU process compositor to run!
+    // Disabling it causes instant deadlocks. We let it fallback to SwiftShader naturally.
     command_line->AppendSwitchWithValue("lang", "en-US");
-    command_line->AppendSwitch("disable-gpu");
-    command_line->AppendSwitch("disable-gpu-compositing");
   }
  private:
   IMPLEMENT_REFCOUNTING(SpikeApp);
@@ -219,7 +219,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
   // CHECK()ed inside the resource manager. Pin en-US explicitly and point
   // CEF at the locales/ tree shipped beside the exe by spike_cef's
   // POST_BUILD copy_directory step.
-  CefString(&settings.locale).FromString("en-US");
+  CefString(&settings.locale) = "en-US";
   CefString(&settings.locales_dir_path) = base + L"\\locales";
   CefString(&settings.resources_dir_path) = base;
 
