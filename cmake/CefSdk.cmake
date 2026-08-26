@@ -140,10 +140,19 @@ function(sx_setup_cef)
   # headers they are being built AS PART OF the wrapper. Must stay PRIVATE -
   # leaking it into consumers would expose wrapper-internal declarations
   # that libcef.lib does not export.
+  #
+  # UNICODE/_UNICODE select the wide-char Windows API surface (LoadLibraryExW,
+  # CreateFileW, ...): wrapper TUs such as cef_scoped_library_loader_win.cc
+  # pass wchar_t strings, and without these the ANSI overloads get selected,
+  # failing with C2664 "cannot convert argument 1 from 'const _Elem *'
+  # [with _Elem=wchar_t] to 'LPCSTR'". Matches the SDK's own wrapper build
+  # settings on Windows. PRIVATE scope: spike_cef defines its own pair.
   target_compile_definitions(libcef_dll_wrapper PRIVATE
     NOMINMAX
     WIN32_LEAN_AND_MEAN
-    WRAPPING_CEF_SHARED)
+    WRAPPING_CEF_SHARED
+    UNICODE
+    _UNICODE)
 
   if(MSVC)
     set_target_properties(libcef_dll_wrapper PROPERTIES
